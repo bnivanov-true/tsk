@@ -2508,7 +2508,7 @@ fn clicking_trailing_step_add_works_from_every_task_page_edit_mode() {
             .area;
         assert_eq!(
             map_board_mouse(model, &hits, left_click(area.x, area.y)),
-            Some(BoardIntent::BeginAddStep),
+            Some(BoardIntent::BeginAppendStep),
             "StepAdd must remain clickable in {:?}",
             model.input_mode()
         );
@@ -3870,4 +3870,38 @@ fn cleanup_card_close_control_cancels_like_esc() {
             .expect("card chrome");
         assert_eq!(click(chrome, &model, &hits), None, "the border stays inert");
     }
+}
+
+/// #159 review F-3: `ctrl+a` adds below the selected step, but a click on the trailing
+/// `+ step` row means the end of the list, whatever step is selected.
+#[test]
+fn clicking_trailing_step_add_appends_even_with_a_step_selected() {
+    let (mut domain, mut model, id) = board_with_task("append click", HumanStatus::Ready);
+    for text in ["a", "b"] {
+        domain.add_step(id, text).expect("add stored step");
+    }
+    model.sync_from_domain(&domain);
+    for intent in [BoardIntent::OpenTaskPage, BoardIntent::SelectStep(0)] {
+        apply_intent(&mut domain, &mut model, intent, None).expect("select a step");
+    }
+    let hits = board_hit_map(STANDARD, &model);
+    let area = hits
+        .regions
+        .iter()
+        .find(|hit| hit.target == QueueHitTarget::StepAdd)
+        .expect("trailing add hit")
+        .area;
+    let intent = map_board_mouse(&model, &hits, left_click(area.x, area.y)).expect("add click");
+    apply_intent(&mut domain, &mut model, intent, None).expect("open the add row");
+    for intent in [BoardIntent::EditInsert('z'), BoardIntent::ConfirmEdit] {
+        apply_intent(&mut domain, &mut model, intent, None).expect("save the step");
+    }
+    let texts: Vec<&str> = domain
+        .get(id)
+        .expect("task")
+        .steps
+        .iter()
+        .map(|step| step.text.as_str())
+        .collect();
+    assert_eq!(texts, vec!["a", "b", "z"]);
 }

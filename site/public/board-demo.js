@@ -2193,14 +2193,19 @@ import { parseCapture } from "./capture.js";
   }
 
   function primaryVerb() {
+    const bulk = state.markMode && state.markedIds.size > 0;
     const tasks = targetTasks();
     const changed = tasks.filter(
       (task) => task.status === "open" || task.status === "ready",
     );
+    const skippedDone = tasks.filter((task) => task.status === "done").length;
     for (const task of changed) logStatus(task, "started");
     clearMarks();
     state.pendingDelete = null;
-    state.message = "";
+    state.message =
+      bulk && skippedDone
+        ? `started ${changed.length} · skipped ${skippedDone} done (n or o reopens them)`
+        : "";
     flashTasks(changed);
   }
 
@@ -2236,14 +2241,19 @@ import { parseCapture } from "./capture.js";
   }
 
   function previewPrimaryVerb() {
+    const bulk = preview.markMode && preview.markedIds.size > 0;
     const tasks = targetTasks(preview);
     const changed = tasks.filter(
       (task) => task.status === "open" || task.status === "ready",
     );
+    const skippedDone = tasks.filter((task) => task.status === "done").length;
     for (const task of changed) logStatus(task, "started");
     clearMarks(preview);
     preview.pendingDelete = null;
-    preview.message = "";
+    preview.message =
+      bulk && skippedDone
+        ? `started ${changed.length} · skipped ${skippedDone} done (n or o reopens them)`
+        : "";
     flashTasks(changed);
   }
 
@@ -2374,16 +2384,27 @@ import { parseCapture } from "./capture.js";
       ["task actions", "o", "inbox", "status open"],
       ["task actions", "x", "delete", "remove"],
       ["task actions", "u", "undo", "restore"],
-      ["task actions", "f", "archive", "file hide"],
+      ["task actions", "f", "archive / restore (archived: z drawer)", "file hide restore"],
       ["create & edit", "+", "quick-add", "capture new task"],
       ["create & edit", "e", "edit title", "rename"],
-      ["create & edit", "a", "add step (task page)", "checklist"],
+      [
+        "create & edit",
+        "a",
+        "add step below selected (task page)",
+        "checklist insert",
+      ],
+      [
+        "task actions",
+        "alt+↑ / alt+↓",
+        "move selected step (task page)",
+        "checklist reorder",
+      ],
       ["views & find", "1", "desk", "switch view"],
       ["views & find", "2", "selected project", "switch view"],
       ["views & find", "3", "projects", "switch view"],
       ["views & find", "p", "project picker", "switch find"],
       ["views & find", "z / D", "done drawer", "completed tasks"],
-      ["views & find", "g", "toggle inbox / groups", "collapse expand"],
+      ["views & find", "g", "fold / unfold group", "collapse expand inbox archived"],
       ["views & find", "/", "search board", "find filter tasks projects"],
       ["views & find", ":", "command palette", "find actions"],
       ["app controls", "?", "help", "shortcuts keys"],
@@ -2601,11 +2622,17 @@ import { parseCapture } from "./capture.js";
                 )
                   .map((line) => `<span>${esc(line)}</span>`)
                   .join("")}</span>`
-          }</div>`,
+          }</div>${
+            pageSteps.editor &&
+            !pageSteps.editor.id &&
+            pageSteps.editor.after === step.id
+              ? `<div class="tsk-step-new">${inlineEditor}</div>`
+              : ""
+          }`,
       )
       .join(
         "",
-      )}${pageSteps.editor && !pageSteps.editor.id ? `<div class="tsk-step-new">${inlineEditor}</div>` : `<button type="button" class="tsk-step-add dim" ${addAttribute}="1">   + step</button>`}</div>`;
+      )}${pageSteps.editor && !pageSteps.editor.id && !pageSteps.editor.after ? `<div class="tsk-step-new">${inlineEditor}</div>` : `<button type="button" class="tsk-step-add dim" ${addAttribute}="1">   + step</button>`}</div>`;
     // Match the TUI's pinned, wrapped footer, including bases without a repo/default lookup.
     const base =
       task.base || (task.project && !fixture ? "main (default)" : "default");
@@ -2851,7 +2878,6 @@ import { parseCapture } from "./capture.js";
           return `<button type="button" class="tsk-group" data-archived-header="1"><span class="dim">${mark}</span> <span class="sec">${selected ? "<strong>archived</strong>" : "archived"}</span><span class="rule" aria-hidden="true"></span><span class="count dim">${row.count}</span></button>`;
         }
         const task = row.task;
-        if (rail && task.status === "done") return "";
         const selected = task.id === state.selectedId;
         const marked = state.markedIds.has(task.id);
         const rowMark = selected
@@ -3303,6 +3329,19 @@ import { parseCapture } from "./capture.js";
       render();
       return true;
     }
+    if (
+      e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      ["ArrowUp", "ArrowDown"].includes(e.key)
+    ) {
+      e.preventDefault();
+      if (previewSteps.shift(task, e.key === "ArrowUp" ? -1 : 1)) {
+        task.updatedAt = clock();
+        render();
+      }
+      return true;
+    }
     if (bare && ["Tab", "ArrowDown", "ArrowUp", "j", "k"].includes(e.key)) {
       e.preventDefault();
       previewSteps.move(
@@ -3723,6 +3762,19 @@ import { parseCapture } from "./capture.js";
         steps.save(task, true);
         task.updatedAt = clock();
         render();
+        return;
+      }
+      if (
+        e.altKey &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        ["ArrowUp", "ArrowDown"].includes(e.key)
+      ) {
+        e.preventDefault();
+        if (steps.shift(task, e.key === "ArrowUp" ? -1 : 1)) {
+          task.updatedAt = clock();
+          render();
+        }
         return;
       }
       if (bare && ["Tab", "ArrowDown", "ArrowUp", "j", "k"].includes(e.key)) {

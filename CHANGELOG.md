@@ -27,6 +27,7 @@ the GitHub release notes verbatim.
 - `tsk dispatch` and `tsk clean`, plus `--assignee` and `--base` on `tsk add`/`tsk edit`. Agent skill 1.5.0; `tsk update` refreshes installed copies.
 - Merge a task's pull request from the cleanup card: with the GitHub CLI (`gh`) installed and logged in, the card shows the task's pull request, and `m` merges an open one into the recorded base (`gh pr merge`, never `--admin`), then, once GitHub shows it merged, marks the task done and cleans up as `y` does; quitting waits for a running merge. A failed merge changes nothing and the card shows gh's reason; on a marked set only the merged tasks complete. `[merge] method` in `config.toml` picks `merge` (the default), `squash`, or `rebase`. From a script: `tsk status T12 done --merge` or `tsk clean T12 --merge`.
 - Undo for status changes, steps, and archiving: `ctrl+u` reverts a plain start, ready, open, a reopen, or an unblock (the reply box's too), putting back any block or review round it closed; a step tick, untick, new step, removal, or new step text; and archiving or restoring tasks with `ctrl+f`. A start that launched an agent undoes the status only (`start undone · T12 back to ready · @claude kept running`). A marked set is one undo step. Thanks @LukasGold (#173).
+- Reorder steps. On the task page, `alt+↑` / `alt+↓` moves the selected step (also **move step up** / **move step down** in the `:` palette, which now opens on the task page too), and `ctrl+a` with a step selected adds the new step directly below it. From the CLI, `tsk steps T12 move <short-id> --before|--after <short-id>` or `--first`/`--last`, and `tsk steps T12 add "…"` with the same place flags. A moved step keeps its short ID and checked state. Thanks @LukasGold (#159).
 
 ### Changed
 
@@ -53,10 +54,16 @@ the GitHub release notes verbatim.
 - Cleanup deletes a squash- or rebase-merged branch when `gh` confirms its pull request merged at exactly the branch's tip; before, it was always kept as not merged. Without `gh` nothing changes.
 - A project reached through a symlinked path, such as `/tmp/repo` and `/private/tmp/repo` on macOS, is one project.
 - With tasks marked, `Esc` in the thread or view picker closes the picker and keeps the marks.
+- At 110 columns or wider, the Task view's narrow board rail keeps an open done drawer and the archived group's fold state, like Split does, so a done task opened from the drawer stays selected beside its page instead of vanishing from the rail. Thanks @LukasGold (#174).
+- A form editor that receives `Shift+Enter` as `ctrl+j` (a terminal binding that sends a plain line feed, such as Ghostty's `shift+enter=text:\n`) says so on the status row instead of ignoring the key. Thanks @WAWLixiong and @Rag0n.
+- `tsk setup herdr` follows a symlinked Herdr `config.toml` (or `herdr` config directory), as dotfiles managers create, instead of failing with `Too many levels of symbolic links`. It edits the target in place, keeps the link, and backs up beside the target; a dangling or looping link is refused with a clear message.
+- `ctrl+s` on a marked set that includes done tasks says how many it skipped and how to reopen them, instead of skipping them silently. Thanks @LukasGold.
+- Help (`?`) says archived tasks live in the done drawer's archived group, and lists `g` as fold / unfold group. The keys page says which group: the inbox, or the archived group while the done drawer is open. Thanks @LukasGold.
 - The task page's project chooser lists options top to bottom, so `↓` moves down.
 - Windows: `tsk update` and the board's update check work instead of crashing on the first HTTPS request, so update notices appear. A failed check stays silent.
 - `tsk add --file` and piped JSON plans accept a leading UTF-8 byte order mark, as Windows PowerShell 5.1 writes by default.
 - Windows: characters typed with AltGr, such as `[ ] { } @` on a German layout, insert in every text field (quick-add, task editors, search, the palette, Help, and pickers) instead of being dropped. Thanks @LukasGold (#178).
+- `tsk list` orders tasks within each status like the board: ready by oldest pick, open by oldest capture, everything else by most recent status change. `--json` is that flat board order. With `--all`, human output still groups each status by scope, ordering the groups by their first row and keeping the board order inside each group. Thanks @dangerousdan.
 
 ## v0.11.6
 

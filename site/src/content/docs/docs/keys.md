@@ -30,9 +30,9 @@ Press `?` on the board, task page, or another non-text surface for a searchable 
 | Delete, with a second press to confirm | `ctrl+x` or `ctrl+Delete` |
 | Undo the last done, delete, archive, block, review, status change, or step change; restore an archived selection | `ctrl+u` |
 | Reply to the blocked cursor row, or give feedback on a review row, inline under it | `r` |
-| Archive / restore selected task (undoable) | `ctrl+f` |
+| Archive / restore selected task (undoable; archived tasks live in the done drawer's archived group) | `ctrl+f` |
 | Open / close done drawer | `d` |
-| Expand / collapse its archived group | `g` |
+| Fold or unfold the group: the inbox, or archived in the done drawer | `g` |
 | Desk / selected project / projects | `1` / `2` / `3` |
 | Project picker | `p` |
 | Project Filter (threads · @assignees) | `t` |
@@ -50,7 +50,7 @@ Press `?` on the board, task page, or another non-text surface for a searchable 
 
 `Shift+M` enters or leaves multi-select while the board owns input. While it is active, `Space`, shifted arrows, and a plain task click change marks instead of opening a task. Removing the last mark leaves the mode active. `Shift+M` again from the board, `Esc`, a task action, or a lens change leaves it and clears the set. Text entry keeps `Shift+M` as a capital `M`; `Esc` leaves multi-select before cancelling that surface, except in a filter, view, assignee, or base picker, where it closes the picker first.
 
-When tasks are marked, the status, delete, archive, and `@` shortcuts act on that set; without marks they act on the cursor. `Enter` and `ctrl+e` remain cursor-only. `ctrl+s` on a task that still [runs after](/docs/board/#after) unfinished tasks asks first (`y` start now, `Esc` cancel). `ctrl+s` on an assigned task that was never dispatched dispatches it; on a dispatched task whose agent is gone it asks first (`y` relaunch, `n` just start, `Esc` cancel). On a marked set where any task would launch, `ctrl+s` opens one card listing what launches, what only starts, and what stays unstarted; `y` starts and launches them all, `Esc` cancels and keeps the marks. `ctrl+u` right after a start that dispatched restores the status and leaves the agent running. `ctrl+d` on a task with a live dispatch, or a marked set holding some, opens a [cleanup card](/docs/board/#complete-and-clean-up) whose option lines each say what they do to the pull request, branch, and worktree: `m` merges an open pull request (through `gh`) and tidies up, `y` completes and tidies up without merging, `n` completes and keeps everything, and `Esc` cancels (a bulk card keeps the marks). Only the options that apply are shown. After `y`, `Esc` hides the card while cleanup continues, or closes a finished one. See [Agents](/docs/board/#agents). `ctrl+s` starts each eligible open or ready task and leaves started, blocked, and review tasks unchanged. Bulk block and review toggles send every target to blocked or review (through one card) unless all targets already have that status, in which case they all return to ready. `ctrl+n` and `ctrl+o` can send done tasks directly to ready or open. One `ctrl+u` reverses an entire marked completion, deletion, block, or review.
+When tasks are marked, the status, delete, archive, and `@` shortcuts act on that set; without marks they act on the cursor. `Enter` and `ctrl+e` remain cursor-only. `ctrl+s` on a task that still [runs after](/docs/board/#after) unfinished tasks asks first (`y` start now, `Esc` cancel). `ctrl+s` on an assigned task that was never dispatched dispatches it; on a dispatched task whose agent is gone it asks first (`y` relaunch, `n` just start, `Esc` cancel). On a marked set where any task would launch, `ctrl+s` opens one card listing what launches, what only starts, and what stays unstarted; `y` starts and launches them all, `Esc` cancels and keeps the marks. `ctrl+u` right after a start that dispatched restores the status and leaves the agent running. `ctrl+d` on a task with a live dispatch, or a marked set holding some, opens a [cleanup card](/docs/board/#complete-and-clean-up) whose option lines each say what they do to the pull request, branch, and worktree: `m` merges an open pull request (through `gh`) and tidies up, `y` completes and tidies up without merging, `n` completes and keeps everything, and `Esc` cancels (a bulk card keeps the marks). Only the options that apply are shown. After `y`, `Esc` hides the card while cleanup continues, or closes a finished one. See [Agents](/docs/board/#agents). `ctrl+s` starts each eligible open or ready task and leaves started, blocked, and review tasks unchanged. Marked done tasks are skipped too, and the status row says so: `started N · skipped M done (ctrl+n or ctrl+o reopens them)`. Bulk block and review toggles send every target to blocked or review (through one card) unless all targets already have that status, in which case they all return to ready. `ctrl+n` and `ctrl+o` can send done tasks directly to ready or open. One `ctrl+u` reverses an entire marked completion, deletion, block, or review.
 
 ## Block card
 
@@ -93,16 +93,20 @@ These keys apply in **view mode**:
 | Edit why, on, and needs, or done, checks, next, and on (top line selected), or your selected reply | `ctrl+e` |
 | Activate first step, then move among steps | `↓`, then `↑` / `↓` |
 | Toggle selected step | `Enter` |
-| Add step | `ctrl+a` |
+| Add step (below the selected step, else at the end) | `ctrl+a` |
+| Move selected step up or down | `alt+↑` / `alt+↓` |
 | Edit title or selected step | `ctrl+e` |
 | Change task status | Board status shortcuts above |
 | Assign: pick an agent profile or **none** | `@` or click the footer's `@name` / `+ assign` |
 | Mark/remove selected step; soft-delete your selected reply; otherwise confirm/delete task | `ctrl+x` |
+| Command palette | `:` |
 | All shortcuts | `?` |
 | Close task | `Esc` |
 | Quit the board | `ctrl+q` |
 
-Click a step to select it. Click **+ step** to add. Click a review check to cycle it, or the `N passed` line to show or fold the passed checks. Click the paper trail's heading to expand or collapse it, and a closed record to expand it. Field clicks become editable only after task editing starts.
+Click a step to select it. Click **+ step** to add at the end. Click a review check to cycle it, or the `N passed` line to show or fold the passed checks. Click the paper trail's heading to expand or collapse it, and a closed record to expand it. Field clicks become editable only after task editing starts.
+
+`alt+↑` / `alt+↓` is the one mutating shortcut without `ctrl`: macOS reserves `ctrl+arrows` for Mission Control. It also works during task editing while a step is selected and no field is open. Your terminal must send `alt+↑` as one modified key (xterm's default); a terminal set to prefix Option or Alt with `Esc` delivers `Esc` and then the arrow, which closes the task page.
 
 The board's `1` `2` `3` tab keys stay on the board; on the task page, and in the wide task column while it has focus, the digits pick options instead. Each BLOCKED or REVIEW section ends in a dim action line listing only the keys that work right now.
 
@@ -134,6 +138,10 @@ On a review, the same box takes feedback: `Shift+Enter` saves it and the task st
 `ctrl+e` moves to line end in text editors. `ctrl+a` moves to line start in quick-add; on the task page it adds a step instead. Paste preserves line breaks in Notes and converts them to spaces in single-line fields.
 
 The editing ring is Title → Notes → steps → **+ step** → Assignee → Base → After → Thread → Scope → Title; `Shift+Tab` reverses it. Editing keys take precedence over view-mode status shortcuts. In the step editor, `ctrl+d` and `ctrl+o` still address the task; `ctrl+x` removes the step being edited, staged until the task edit is saved; `ctrl+a` adds another step. Notes are reached with `ctrl+e`, then `Tab`. `Alt+Enter` does not save the task edit.
+
+### If Shift+Enter does not save
+
+Some terminals are set to send a plain line feed for `Shift+Enter` (Ghostty's `keybind = shift+enter=text:\n`, for example). tsk reads that as `ctrl+j`, so the form does not save. In a form editor, `ctrl+j` shows `Shift+Enter sent Ctrl+J: check terminal keys` on the status row and changes nothing. Remove the binding, or map `Shift+Enter` to a sequence that keeps the Shift modifier, then try again.
 
 ## Quick-add
 

@@ -141,7 +141,10 @@ A message `[tsk T12 unblocked] …` or `[tsk T12 reply] …` in your session is 
 block. Text over 4 KB refuses with `text-too-long`. Never unblock a task yourself unless the user said so.
 
 **Plan as steps.** When the user wants order of work tracked on the task: `tsk steps T12 add
-"…"` per step, in order. Do not add steps for your own bookkeeping.
+"…"` per step, in order. Do not add steps for your own bookkeeping. To fit a step into an existing
+list, `add "…" --after <short_id>` (or `--before`); to reorder, `tsk steps T12 move <short_id>
+--before|--after <short_id>` or `--first`/`--last`. A moved step keeps its short id and checked
+state, and a repeated move is safe.
 
 **Capture many.** `cat plan.json | tsk add` with
 `[{"title": "…", "notes": "…", "project": "…", "thread": "…", "assignee": "…", "base": "…", "after": [12]}]`; only `title` is required, an

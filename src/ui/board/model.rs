@@ -767,6 +767,9 @@ pub(super) struct StepEditor {
     /// Expanded capture has no durable step ids yet, so an existing staged row is addressed by
     /// its stable draft index until the capture saves.
     pub(super) pending_index: Option<usize>,
+    /// A task-page add row lands directly below this stored step (`ctrl+a` with a step
+    /// selected); `None` appends. An id, not an index, so other writers cannot shift it.
+    pub(super) insert_after: Option<Uuid>,
     pub(super) refusal: Option<String>,
 }
 
@@ -820,6 +823,42 @@ pub(super) struct StepsPageState {
     /// Wrapped row count for each stored step at the last painted width. The renderer records
     /// it so keyboard movement scrolls to the selected step's first wrapped row.
     pub(super) row_counts: std::cell::RefCell<Vec<usize>>,
+    /// Step text wrap width at the last paint, so a step added between paints can be
+    /// measured before the renderer records its row count.
+    pub(super) text_width: std::cell::Cell<usize>,
+}
+
+/// Keep the selected step in the renderer-recorded shared content viewport.
+pub(super) fn steps_scroll_to_cursor(form: &mut BoardForm, cursor: usize) {
+    let counts = form.steps.row_counts.borrow();
+    let wrapped_before: usize = if counts.len() >= cursor {
+        counts.iter().take(cursor).copied().sum()
+    } else {
+        cursor
+    };
+    drop(counts);
+    steps_scroll_to_row(form, wrapped_before, 0);
+}
+
+/// Keep the steps row `wrapped_before` wrapped rows below the first step inside the
+/// viewport. `added_rows` is content the last paint did not see yet (a new add row or
+/// step), which raises the recorded scroll horizon by as much.
+pub(super) fn steps_scroll_to_row(form: &mut BoardForm, wrapped_before: usize, added_rows: usize) {
+    let target = form
+        .steps
+        .content_start
+        .get()
+        .saturating_add(1)
+        .saturating_add(wrapped_before);
+    let rows = form.steps.window_rows.get().max(1);
+    if target < form.notes_scroll {
+        form.notes_scroll = target;
+    } else if target >= form.notes_scroll.saturating_add(rows) {
+        form.notes_scroll = target + 1 - rows;
+    }
+    form.notes_scroll = form
+        .notes_scroll
+        .min(form.notes_max_scroll.get().saturating_add(added_rows));
 }
 
 /// Scope choices shared by capture and task forms.
@@ -5562,14 +5601,47 @@ impl BoardModel {
             self.input_mode = BoardInputMode::TaskPage;
         } else if pending.reopen {
             // The rapid-capture loop: the in-place row reopens empty for the next step, its
-            // mode never having left it.
+            // mode never having left it. A positioned row follows the step it just added, so
+            // consecutive steps keep their typed order and the selector rides along.
+            let anchored = form
+                .steps
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.insert_after.is_some());
             form.steps.add_selected = false;
             form.steps.editor = Some(StepEditor {
                 buffer: seeded_draft(""),
                 rename: None,
                 pending_index: None,
+                insert_after: anchored.then_some(pending.step),
                 refusal: None,
             });
+            let new_index = self
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.steps.iter().position(|step| step.id == pending.step));
+            if let Some(index) = new_index.filter(|_| anchored) {
+                form.steps.cursor = Some(index);
+                // Measure the saved step at the last painted width, then keep the reopened
+                // row below it in view; the next paint re-records the real heights.
+                let width = form.steps.text_width.get();
+                let rows = if width == 0 {
+                    1
+                } else {
+                    crate::ui::edit::wrap_text(&pending.text, width)
+                        .len()
+                        .max(1)
+                };
+                let through_new: usize = {
+                    let mut counts = form.steps.row_counts.borrow_mut();
+                    if index <= counts.len() {
+                        counts.insert(index, rows);
+                    }
+                    counts.iter().take(index + 1).sum()
+                };
+                steps_scroll_to_row(form, through_new, rows);
+            }
         } else {
             form.steps.editor = None;
             form.steps.cursor = self

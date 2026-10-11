@@ -341,7 +341,7 @@ On a task-board list, `ctrl+s`, `ctrl+n`, `ctrl+o`, `ctrl+d`, `ctrl+b`, `ctrl+r`
 | `ctrl+r` | Review with what was done (the [review card](#review-with-what-was-done)); on a task in review, return it to ready |
 | `r` | Reply to a blocked row, or give feedback on a review row, inline ([reply](#block-with-a-reason)); cursor only |
 
-`ctrl+s` starts each eligible open or ready task and leaves started, blocked, and review tasks unchanged. Bulk block and review toggles are all-or-nothing: if every target already has that status they all return to ready, otherwise they all move to that status (blocking through one block card and review through one review card; tasks already blocked keep their block, tasks in review their round). Other status verbs are absolute, so repeating the current status does nothing. Done tasks can be sent directly to ready or open.
+`ctrl+s` starts each eligible open or ready task and leaves started, blocked, and review tasks unchanged. Marked done tasks are skipped, and the status row names them: `started N · skipped M done (ctrl+n or ctrl+o reopens them)`. Bulk block and review toggles are all-or-nothing: if every target already has that status they all return to ready, otherwise they all move to that status (blocking through one block card and review through one review card; tasks already blocked keep their block, tasks in review their round). Other status verbs are absolute, so repeating the current status does nothing. Done tasks can be sent directly to ready or open.
 
 Agents can set any status with [the CLI](/docs/cli/#status). Task status does not change automatically when steps are checked or an agent stops; the one automatic start is a ready task whose last [prerequisite](#after) is done.
 
@@ -390,7 +390,7 @@ At **110 usable columns** or wider, use `→` / `l` and `←` / `h` to move thro
 | Task | Task details beside a narrow board rail |
 | Full screen | Task details only |
 
-Press `Enter` from the board to open a task full screen. `Esc` returns to the view you left. From task focus, `Esc` returns focus to the board beside it. On Projects Overview, the slider stops at Rail: it shows a live project board beside the index and never opens a full-screen task; `Enter` in that right column opens the task page inside the column.
+Press `Enter` from the board to open a task full screen. `Esc` returns to the view you left. The rail keeps the board's done drawer and archived fold state, so a done task opened from the drawer stays selected beside its page. From task focus, `Esc` returns focus to the board beside it. On Projects Overview, the slider stops at Rail: it shows a live project board beside the index and never opens a full-screen task; `Enter` in that right column opens the task page inside the column.
 
 Click a task on the full-width board to open its details alongside it, keeping board focus. Click inside the task column to focus it. Click a task in the rail to bring back the split board. While editing, arrows move the text cursor instead. On the projects tab, click the right preview to focus its live board, or click an index row from Rail to rebind it and return to Split.
 
@@ -454,7 +454,7 @@ Deleted tasks remain available through [trash commands](/docs/cli/#trash) for a 
 
 ## Palette
 
-Press `:` and type to find an action. Use arrows or `Tab` to select, `Enter` to run, and `Esc` to close.
+Press `:` on the board or a task page and type to find an action. Use arrows or `Tab` to select, `Enter` to run, and `Esc` to close.
 
 | Available actions | When |
 | --- | --- |
@@ -463,6 +463,7 @@ Press `:` and type to find an action. Use arrows or `Tab` to select, `Enter` to 
 | Set assignee, set base, set after… | A task is selected |
 | Dispatch again | A task with a dispatch record is selected |
 | Chain in order | Two or more tasks are marked |
+| Move step up, move step down | A task-page step is selected |
 | Retry save, cancel save | A save has failed |
 
 **Set assignee** opens the same picker as `@`; **set base** opens the branch picker; **set after…** opens the [task picker](#after). Each applies to the marked set when marks are present, with one save and one undo. **Chain in order** makes each marked task run after the one marked before it. **Set status: started** takes the same route as `ctrl+s`, including on blocked and review tasks: an assigned task dispatches, and with marks the [start card](#start-a-marked-set) opens. **Dispatch again** ignores and clears marks, then relaunches only the cursor.

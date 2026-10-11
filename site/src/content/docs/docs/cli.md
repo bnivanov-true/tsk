@@ -36,7 +36,7 @@ Use `--json` on `add`, `list`, or `clean` for machine-readable output. Read the 
 | `tsk edit` | Replace title or notes; assign or unassign |
 | `tsk dispatch` | Launch an assigned task's agent in its own worktree |
 | `tsk clean` | Remove a dispatched worktree and its merged branch |
-| `tsk steps` | Add, toggle, rename, or remove steps |
+| `tsk steps` | Add, toggle, rename, move, or remove steps |
 | `tsk archive` / `tsk unarchive` | Hide or restore a task |
 | `tsk project archive` / `tsk project unarchive` | Hide or restore a project |
 | `tsk trash restore` | Restore a task from trash |
@@ -185,7 +185,7 @@ Scope flags are mutually exclusive. So are `--open`, `--ready`, `--done`, `--del
 
 A direct task address searches the main store, including done, archived, and recently deleted tasks. It cannot be combined with scope, thread, assignee, or status filters. A missing task exits 2. A task already moved to `trash.jsonl` is not addressable; find it with `tsk list --deleted` (optionally `-p`), or restore it with `tsk trash restore`.
 
-Human output groups by status in `STARTED`, `READY`, `OPEN`, `BLOCKED`, `REVIEW` order; filtered rows include the task number, assignee, base, and thread, and `--all` adds scope labels using a unique concise trailing path or desk. List output and errors wrap to the attached terminal width with hanging indentation. Task rows, scope labels, notes, steps, archived marks, and threads use the same wrapping behavior, supported from 50 columns. Redirected output keeps stored logical lines. Command help is reference text and instead always wraps at 80 columns.
+Human output groups by status in `STARTED`, `READY`, `OPEN`, `BLOCKED`, `REVIEW` order. Within a status, rows follow the board's section order: `ready` oldest pick first, `open` oldest capture first, and `started`, `blocked`, `review` and `done` most recent status change first. JSON is that flat board order. With `--all`, human output groups each status by scope: the groups are ordered by their first row, and the rows inside each group keep the board order, so interleaved scopes print in a different order from JSON; filtered rows include the task number, assignee, base, and thread, and `--all` adds scope labels using a unique concise trailing path or desk. List output and errors wrap to the attached terminal width with hanging indentation. Task rows, scope labels, notes, steps, archived marks, and threads use the same wrapping behavior, supported from 50 columns. Redirected output keeps stored logical lines. Command help is reference text and instead always wraps at 80 columns.
 
 Single-task output removes metadata from the title row and presents notes, steps, `@assignee`, `⎇ <base>` when explicitly set, `after T202, T205 (done)` and `before T203` when it has them, `#thread`, then `activity` (the latest five [paper trail](/docs/task-page/#paper-trail) entries, newest first, such as `open → started · @claude 2m`, and `+ N earlier`) as separate blocks. A blank line separates adjacent blocks that exist. Human step rows show state and text without machine-oriented short IDs.
 
@@ -353,19 +353,23 @@ Refusal codes: `unknown-task`, `not-dispatched`, `already-cleaned`, `dirty-workt
 ## steps
 
 ```text
-tsk steps <task> add <text> [--state-dir <dir>]
+tsk steps <task> add <text> [<place>] [--state-dir <dir>]
 tsk steps <task> toggle <step-short-id> [--state-dir <dir>]
 tsk steps <task> rename <step-short-id> <text> [--state-dir <dir>]
+tsk steps <task> move <step-short-id> <place> [--state-dir <dir>]
 tsk steps <task> remove <step-short-id> [--state-dir <dir>]
 ```
 
-Read short IDs with `tsk list T12 --json`. Full step UUIDs also work.
+`<place>` is one of `--before <step-short-id>`, `--after <step-short-id>`, `--first`, or `--last`. `add` appends without one; `move` requires one. Other actions refuse a place as a usage error (exit 2).
+
+Read short IDs with `tsk list T12 --json`. Full step UUIDs also work. A moved step keeps its ID, short ID, and checked state.
 
 | Action | Output prefix | Safe to repeat unchanged? |
 | --- | --- | --- |
 | Add | `added <short-id> <text>` | No; creates another step |
 | Toggle | `toggled <short-id> [x] <text>` | No; flips the value again |
 | Rename | `renamed <short-id> <text>` | Yes |
+| Move | `moved <short-id> to <position>/<count> <text>` | Yes; an unchanged position writes nothing |
 | Remove | `removed <short-id> <text>` | No; refuses after removal |
 
 Read back with `tsk list T12 --json` before retrying an uncertain result. [Using steps on the board](/docs/steps/).
@@ -443,7 +447,7 @@ On a TTY, bare `tsk setup` detects global agent skill roots and asks once to ins
 
 ### Herdr
 
-Requires Herdr 0.9+ on PATH; Herdr's supported `0.9.0-preview.*` Windows builds qualify. Registers the installed binary and adds **prefix+t** and **prefix+a**. A plugin command you already bound to another key is left alone; setup never adds the default chord beside it. Shortcut conflicts require confirmation; noninteractive conflicts stop before writes. `tsk setup herdr --check` prints `bound` when both plugin commands are already in the config (on any keys), otherwise `unbound`, and changes nothing. On macOS/Linux it uses `HERDR_CONFIG_PATH`, then `XDG_CONFIG_HOME/herdr/config.toml`, then `~/.config/herdr/config.toml`. On Windows it uses `HERDR_CONFIG_PATH`, then `%APPDATA%\herdr\config.toml`, with `%USERPROFILE%\AppData\Roaming\herdr\config.toml` as the fallback. Windows setup installs PowerShell launchers; Herdr's Windows plugin support is preview.
+Requires Herdr 0.9+ on PATH; Herdr's supported `0.9.0-preview.*` Windows builds qualify. Registers the installed binary and adds **prefix+t** and **prefix+a**. A plugin command you already bound to another key is left alone; setup never adds the default chord beside it. Shortcut conflicts require confirmation; noninteractive conflicts stop before writes. `tsk setup herdr --check` prints `bound` when both plugin commands are already in the config (on any keys), otherwise `unbound`, and changes nothing. On macOS/Linux it uses `HERDR_CONFIG_PATH`, then `XDG_CONFIG_HOME/herdr/config.toml`, then `~/.config/herdr/config.toml`. On Windows it uses `HERDR_CONFIG_PATH`, then `%APPDATA%\herdr\config.toml`, with `%USERPROFILE%\AppData\Roaming\herdr\config.toml` as the fallback. A symlinked config file or config directory is followed and its target edited in place; a dangling or looping link is refused. Windows setup installs PowerShell launchers; Herdr's Windows plugin support is preview.
 
 [Reload, upgrades, and removal](/docs/install/#herdr-setup-with-an-installed-binary).
 
@@ -501,7 +505,7 @@ After an uncertain add, inspect `tsk list --all --json`. Also check `--done` and
 | Edit | `empty-title`, `invalid-title`, `unknown-task`, `soft-deleted-task`, `unknown-agent`, `unknown-base`, `invalid-after`, `after-loop` |
 | Dispatch | `unknown-task`, `soft-deleted-task`, `no-assignee`, `unknown-agent`, `agent-config`, `not-in-herdr`, `unsupported-platform`, `unsafe-state-dir`, `needs-git-project`, `done-task`, `archived-task`, `already-dispatched`, `unknown-base`, `no-default-base`, `herdr-failed` |
 | Clean | `unknown-task`, `not-dispatched`, `already-cleaned`, `dirty-worktree`, `worktree-mismatch`, `files-in-use`, `path-too-long`, `removal-timed-out`, `partly-removed`, `herdr-failed`; with `--merge` also `gh-unavailable`, `no-pr`, `pr-not-open`, `pr-base-mismatch`, `merge-failed`, `merge-config` |
-| Steps | `empty-step-text`, `invalid-step-text`, `unknown-task`, `soft-deleted-task`, `unknown-step`, `ambiguous-step` |
+| Steps | `empty-step-text`, `invalid-step-text`, `unknown-task`, `soft-deleted-task`, `unknown-step`, `ambiguous-step`, `same-step` |
 | Status | `unknown-task`, `soft-deleted-task`, `text-too-long`, `invalid-blocker`; `started` adds `after-not-done`, `agent-gone`, and the launch codes `unknown-agent`, `agent-config`, `unsupported-platform`, `unsafe-state-dir`, `needs-git-project`, `unknown-base`, `no-default-base`, `herdr-failed`; with `--clean`, cleanup codes above except `not-dispatched` and `already-cleaned`; with `--merge`, every cleanup code above plus `gh-unavailable`, `no-pr`, `pr-not-open`, `pr-base-mismatch`, `merge-failed`, `merge-config` |
 | Reply | `unknown-task`, `soft-deleted-task`, `not-blocked`, `empty-reply`, `text-too-long` |
 | Archive / unarchive | `unknown-task`, `soft-deleted-task` |

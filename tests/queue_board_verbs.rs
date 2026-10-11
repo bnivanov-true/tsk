@@ -1905,6 +1905,77 @@ fn bulk_start_preserves_per_task_eligibility_and_toggle_verbs_are_all_or_nothing
 }
 
 #[test]
+fn bulk_start_names_skipped_done_marks_on_the_status_row() {
+    let (mut domain, mut model, open) = board_with_task("open", HumanStatus::Open);
+    let mut done = Vec::new();
+    for title in ["done one", "done two"] {
+        let id = domain
+            .create(
+                title,
+                None,
+                project(THIS_REPO),
+                ProvenanceOrigin::Manual,
+                None,
+            )
+            .expect("create done");
+        domain.complete(id).expect("complete");
+        done.push(id);
+    }
+    model.sync_from_domain(&domain);
+    apply_intent(&mut domain, &mut model, BoardIntent::ToggleDoneDrawer, None)
+        .expect("open done drawer");
+    mark_tasks(&mut domain, &mut model, &[open, done[0], done[1]]);
+
+    let outcome = apply_intent(&mut domain, &mut model, BoardIntent::PrimaryVerb, None)
+        .expect("start marked set");
+    assert_eq!(outcome, IntentOutcome::Persist);
+    assert_eq!(domain.get(open).expect("open").status, HumanStatus::Started);
+    assert!(done
+        .iter()
+        .all(|id| domain.get(*id).expect("done").status == HumanStatus::Done));
+    assert_eq!(
+        model.message(),
+        Some("started 1 · skipped 2 done (ctrl+n or ctrl+o reopens them)")
+    );
+
+    // A marked set of only done tasks changes nothing but still says why.
+    mark_tasks(&mut domain, &mut model, &[done[0]]);
+    let outcome = apply_intent(&mut domain, &mut model, BoardIntent::PrimaryVerb, None)
+        .expect("start done-only set");
+    assert_eq!(outcome, IntentOutcome::None);
+    assert_eq!(
+        model.message(),
+        Some("started 0 · skipped 1 done (ctrl+n or ctrl+o reopens them)")
+    );
+}
+
+#[test]
+fn help_names_where_archived_tasks_live_and_g_folds_a_group() {
+    let lines = tsk_tui::ui::input::help_card_lines();
+    let row = |chord: &str| {
+        lines
+            .iter()
+            .find(|line| line.split_whitespace().next() == Some(chord))
+            .cloned()
+            .unwrap_or_else(|| panic!("help lists {chord}:\n{}", lines.join("\n")))
+    };
+    let archive = row("ctrl+f");
+    assert!(
+        archive.contains("restore") && archive.contains("archived: d drawer"),
+        "ctrl+f help must say where archived tasks live: {archive}"
+    );
+    // `g` also has a task-page row (paper trail); the board row is the fold.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.split_whitespace().next() == Some("g")
+                && line.contains("fold / unfold group")),
+        "g help must name its generic fold action:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
 fn bulk_verbs_reach_marked_done_drawer_rows_and_archive_each_mark() {
     let (mut domain, mut model, first) = board_with_task("first", HumanStatus::Done);
     let second = domain
@@ -3235,7 +3306,9 @@ fn help_card_lists_every_binding_scrolls_and_closes_on_esc() {
         Some(BoardIntent::HelpQueryInsert('?'))
     );
 
-    for character in "drawer".chars() {
+    // `drawer` alone also matches ctrl+f (archived tasks live in the drawer), which sorts
+    // first; the full name keeps this a check of one filtered row.
+    for character in "done drawer".chars() {
         apply_intent(
             &mut domain,
             &mut model,
@@ -3244,7 +3317,7 @@ fn help_card_lists_every_binding_scrolls_and_closes_on_esc() {
         )
         .expect("type query");
     }
-    assert_eq!(model.help_query(), "drawer");
+    assert_eq!(model.help_query(), "done drawer");
     let searched = rendered_board(&model, 80, 24);
     assert!(
         searched.contains("done drawer"),
@@ -3258,7 +3331,7 @@ fn help_card_lists_every_binding_scrolls_and_closes_on_esc() {
     let compact_rows: Vec<_> = compact_search.lines().collect();
     let query_row = compact_rows
         .iter()
-        .position(|row| row.contains("/ drawer"))
+        .position(|row| row.contains("/ done drawer"))
         .expect("focused Help query");
     assert!(
         compact_rows[query_row + 1].matches('─').count() > 10,
@@ -5657,8 +5730,15 @@ fn step_editor_shift_enter_reopens_and_retains_task_editing() {
         model.task_editing(),
         "saving a step must retain the whole task edit session"
     );
-    apply_intent(&mut domain, &mut model, BoardIntent::FormFocusNext, None)
-        .expect("Tab reaches the next existing step after a step save");
+    // The add row was anchored below the selected alpha, so the selector rode along onto
+    // each new step (#159); Shift+Tab reaches the previous existing step after a step save.
+    assert_eq!(
+        model.step_cursor(),
+        Some(2),
+        "the selector rests on the newest step"
+    );
+    apply_intent(&mut domain, &mut model, BoardIntent::FormFocusPrev, None)
+        .expect("Shift+Tab reaches the previous existing step after a step save");
     assert_eq!(model.input_mode(), BoardInputMode::EditStep);
     assert!(rendered_board(&model, 80, 24).contains("▸ ▪ bravo step"));
     let texts: Vec<&str> = domain

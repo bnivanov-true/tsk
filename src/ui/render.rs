@@ -499,6 +499,9 @@ pub struct StepView {
     /// Word-boundary wrapped text rows. The first carries the step glyph, later rows align
     /// under its text so step content never truncates at the page edge.
     pub rows: Vec<String>,
+    /// A positioned add draft painted between stored steps (`ctrl+a` below a selected
+    /// step). It is not a stored step: cursor, mark, count, and hit indices skip it.
+    pub inserted: bool,
 }
 
 /// One painted row of a task-page section (BLOCKED, REVIEW, PAPER TRAIL), and what a click on
@@ -1194,9 +1197,9 @@ fn paint_project_preview_header(
     );
 }
 
-/// Paint the stage G rail: the board list at rail width, no meta column, no done drawer,
-/// wrapped titles with a four-cell continuation indent, and every cell dimmed. The selected
-/// row paints a selection arrow beside its status glyph, without reverse video. `geo` is a footer-less column
+/// Paint the stage G rail: the board list at rail width (the done drawer and archived fold
+/// as on the board), no meta column, wrapped titles with a four-cell continuation indent,
+/// and every cell dimmed. The selected row paints a selection arrow beside its status glyph, without reverse video. `geo` is a footer-less column
 /// geometry ([`crate::ui::tier::resolve_column`]); the shared footer paints separately.
 pub fn draw_rail_frame(
     frame: &mut Frame<'_>,
@@ -3483,6 +3486,7 @@ fn paint_task_page(
     };
     let done = step_views
         .iter()
+        .filter(|step| !step.inserted)
         .take(stored_step_count)
         .filter(|step| step.done)
         .count();
@@ -3584,13 +3588,23 @@ fn paint_task_page(
                 row -= rows;
             }
             if let Some((index, step, row_in_step)) = found {
+                // Cursor, mark, and hit indices address stored steps, so a positioned add
+                // draft painted between them takes no index of its own.
+                let stored = (!step.inserted).then(|| {
+                    index
+                        - step_views
+                            .iter()
+                            .take(index)
+                            .filter(|step| step.inserted)
+                            .count()
+                });
                 let first_row = row_in_step == 0;
-                let gutter = if first_row && Some(index) == step_cursor {
+                let gutter = if first_row && stored.is_some() && stored == step_cursor {
                     "▸ "
                 } else {
                     "  "
                 };
-                let glyph = if Some(index) == step_marked {
+                let glyph = if stored.is_some() && stored == step_marked {
                     "✗"
                 } else if step.done {
                     "✓"
@@ -3627,10 +3641,12 @@ fn paint_task_page(
                         if editing { style_bold() } else { style_plain() },
                     ),
                 );
-                hits.push(
-                    QueueHitTarget::Step(index),
-                    Rect::new(0, y, content_width, 1),
-                );
+                if let Some(stored) = stored {
+                    hits.push(
+                        QueueHitTarget::Step(stored),
+                        Rect::new(0, y, content_width, 1),
+                    );
+                }
                 // Every wrapped row belongs to the same step. The continuation aligns with
                 // the first row's text and remains copyable without its selection gutter.
                 let step_prefix = 4u16;
@@ -5428,11 +5444,6 @@ fn build_list_rows_inner(
     }
 
     for (section_idx, section) in model.view.sections.iter().enumerate() {
-        // The rail drops the done drawer and its archived group: it is a navigation
-        // strip for open work.
-        if rail && matches!(section.kind, SectionKind::Done | SectionKind::Archived) {
-            continue;
-        }
         // Inbox and archived paint their own selectable headers, dim rows under them.
         if section.kind == SectionKind::Archived {
             out.push(ListRow::Blank);

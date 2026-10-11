@@ -329,7 +329,7 @@ pub fn run(input: ListInput) -> Result<ListResult, ListError> {
         );
     }
     let identities = PathIdentityCache::default();
-    let mut rows = domain
+    let mut tasks = domain
         .tasks()
         .iter()
         .filter(|task| !task.is_notice())
@@ -375,6 +375,15 @@ pub fn run(input: ListInput) -> Result<ListResult, ListError> {
                         }))
             }
         })
+        .collect::<Vec<_>>();
+    // Same order as the board: status group, then the board's section order within it.
+    tasks.sort_by(|a, b| {
+        status_group_rank(a.status)
+            .cmp(&status_group_rank(b.status))
+            .then_with(|| crate::ui::queue::cmp_within_status(a, b))
+    });
+    let rows = tasks
+        .into_iter()
         .map(|task| {
             let mut row = row_for(task, &domain);
             if view == ListView::Archived {
@@ -388,7 +397,6 @@ pub fn run(input: ListInput) -> Result<ListResult, ListError> {
             row
         })
         .collect::<Vec<_>>();
-    rows.sort_by_key(|row| status_group_rank(row.status));
     Ok(ListResult {
         rows,
         view,
