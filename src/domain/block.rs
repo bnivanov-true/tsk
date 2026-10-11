@@ -202,6 +202,10 @@ pub struct Reply {
     pub edited: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
+    /// Already delivered to the dispatched agent on its own (`tsk reply --send`), so the
+    /// record's unblock or send-back does not send it again. Cleared when the text changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sent: bool,
 }
 
 impl Reply {
@@ -303,6 +307,17 @@ impl Block {
             .iter()
             .filter(|check| check.state == CheckState::Failed)
             .map(|check| check.text.as_str())
+            .collect()
+    }
+
+    /// Your live entries on this record not yet delivered, oldest first: the replies (or
+    /// feedback) a send-back or unblock delivers. Deleted entries and ones `tsk reply --send`
+    /// already delivered are skipped; edited ones carry their current text.
+    pub fn owner_entries(&self) -> Vec<&str> {
+        self.replies
+            .iter()
+            .filter(|reply| reply.is_owner() && !reply.deleted && !reply.sent)
+            .map(|reply| reply.text.as_str())
             .collect()
     }
 
@@ -546,6 +561,29 @@ mod opt_time {
 mod tests {
     use super::*;
 
+    /// A send-back or unblock carries your live entries in order: deleted ones and the
+    /// agent's own replies are left out, an edited one reads as edited.
+    #[test]
+    fn owner_entries_skip_deleted_and_agent_replies() {
+        let at = std::time::SystemTime::UNIX_EPOCH;
+        let reply = |by: &str, text: &str, deleted: bool| Reply {
+            by: by.into(),
+            at,
+            text: text.into(),
+            edited: false,
+            deleted,
+            sent: false,
+        };
+        let mut block = Block::open(BlockDraft::default(), "builder", at);
+        block.replies = vec![
+            reply(OWNER, "first", false),
+            reply("builder", "aside", false),
+            reply(OWNER, "dropped", true),
+            reply(OWNER, "second", false),
+        ];
+        assert_eq!(block.owner_entries(), ["first", "second"]);
+    }
+
     #[test]
     fn on_round_trips_its_wire_spelling() {
         for on in [
@@ -615,6 +653,7 @@ mod tests {
             text: "x".into(),
             edited: false,
             deleted,
+            sent: false,
         };
         block.replies.push(reply("claude", false));
         assert!(!block.answered());
@@ -658,6 +697,72 @@ mod state_tests {
             BlockOn::You,
         )
         .expect("draft")
+    }
+
+    /// A reply marked sent leaves the record's delivery; editing it puts it back (the agent
+    /// has not seen the new text). Marking checks the text it sent and changes no history.
+    #[test]
+    fn a_sent_reply_leaves_the_closing_delivery_until_it_is_edited() {
+        let mut state = DomainState::new();
+        let id = task(&mut state);
+        state
+            .block(id, draft("which db?"), "claude")
+            .expect("block");
+        let first = state.reply(id, "use postgres", OWNER).expect("reply");
+        state.reply(id, "add an index", OWNER).expect("reply");
+        let record = state.get(id).unwrap().block.as_ref().unwrap().key();
+        let events = state.get(id).unwrap().history.len();
+        assert!(!state
+            .mark_reply_sent(id, &record, first, "use mysql")
+            .expect("stale text"));
+        assert!(state
+            .mark_reply_sent(id, &record, first, "use postgres")
+            .expect("mark"));
+        assert!(!state
+            .mark_reply_sent(id, &record, first, "use postgres")
+            .expect("again"));
+        let task = state.get(id).unwrap();
+        assert_eq!(task.history.len(), events, "no event");
+        let block = task.block.as_ref().unwrap();
+        assert!(block.replies[first].sent);
+        assert_eq!(block.owner_entries(), ["add an index"]);
+        let wire = serde_json::to_value(block).expect("encode");
+        assert_eq!(wire["replies"][0]["sent"], true);
+        assert!(
+            wire["replies"][1].get("sent").is_none(),
+            "unsent stays off the wire"
+        );
+
+        state.edit_reply(id, first, "use sqlite").expect("edit");
+        let block = state.get(id).unwrap().block.clone().unwrap();
+        assert_eq!(block.owner_entries(), ["use sqlite", "add an index"]);
+    }
+
+    /// A mark bound to a record that closed meanwhile never lands on the next record, even
+    /// on the same reply text at the same index: that reply was never sent.
+    #[test]
+    fn a_mark_for_a_closed_record_leaves_the_next_records_reply_unsent() {
+        let mut state = DomainState::new();
+        let id = task(&mut state);
+        state
+            .block(id, draft("which db?"), "claude")
+            .expect("block");
+        let index = state.reply(id, "use postgres", OWNER).expect("reply");
+        let record = state.get(id).unwrap().block.as_ref().unwrap().key();
+        state.set_status(id, HumanStatus::Ready).expect("unblock");
+        state
+            .block(id, draft("which db now?"), "claude")
+            .expect("block again");
+        assert_eq!(
+            state.reply(id, "use postgres", OWNER).expect("reply"),
+            index
+        );
+        assert!(!state
+            .mark_reply_sent(id, &record, index, "use postgres")
+            .expect("closed record"));
+        let block = state.get(id).unwrap().block.as_ref().unwrap();
+        assert!(!block.replies[index].sent);
+        assert_eq!(block.owner_entries(), ["use postgres"]);
     }
 
     #[test]

@@ -3165,7 +3165,7 @@ fn route_board_start(
                 .copied()
                 .collect::<Vec<_>>();
             model.clear_marks();
-            if start_plain_and_save(
+            if let Some(started) = start_plain_and_save(
                 store,
                 domain,
                 model,
@@ -3176,10 +3176,9 @@ fn route_board_start(
                 any_status,
                 false,
                 in_herdr,
-            )
-            .is_some()
-            {
-                model.set_message(message);
+                host,
+            ) {
+                model.set_message(started.with_delivery(message));
             }
             return true;
         }
@@ -3199,7 +3198,7 @@ fn route_board_start(
         dispatch::StartRoute::Plain => false,
         dispatch::StartRoute::NoLaunch { reason } => {
             let target = task.id;
-            if start_plain_and_save(
+            if let Some(started) = start_plain_and_save(
                 store,
                 domain,
                 model,
@@ -3210,10 +3209,9 @@ fn route_board_start(
                 any_status,
                 false,
                 in_herdr,
-            )
-            .is_some()
-            {
-                model.set_message(dispatch::no_launch_message(reason));
+                host,
+            ) {
+                model.set_message(started.with_delivery(dispatch::no_launch_message(reason)));
             }
             true
         }
@@ -3408,15 +3406,16 @@ fn reply_unblock_route(
     Some((id, route, check))
 }
 
-/// Send the reply this `ctrl+s` stored (or just the unblock, for an empty box) to `id`'s
-/// dispatched agent once the start is durable, and say on the status row how it went.
-/// Nothing is sent when `check` found no live dispatch.
+/// Send `id`'s dispatched agent what the record this `ctrl+s` closed owes it, once the start
+/// is durable: every reply (or feedback entry) you left on that block or review round, the
+/// one just saved included, then a round's failed checks. An empty record sends the unblock
+/// or send-back alone. Says on the status row how it went; nothing is sent when `check` found
+/// no live dispatch.
 fn deliver_reply_after_start(
     domain: &DomainState,
     model: &mut BoardModel,
     id: uuid::Uuid,
     check: &dispatch::AgentCheck,
-    reply: Option<&str>,
     host: &mut impl DispatchHost,
 ) {
     let Some(task) = domain.get(id) else {
@@ -3425,21 +3424,160 @@ fn deliver_reply_after_start(
     let Some(assignee) = task.assignee.as_deref() else {
         return;
     };
-    // A send-back closed the review round this action left: it carries the failed checks.
-    let sent_back = task
-        .past_blocks
-        .last()
-        .filter(|round| round.resolution == Some(crate::domain::Resolution::SentBack));
-    let (label, noun, text) = match sent_back {
-        Some(round) => (
-            "sent back",
-            "feedback",
-            dispatch::send_back_text(reply, &round.failed_checks()),
-        ),
-        None => ("unblocked", "reply", reply.map(str::to_string)),
-    };
-    if let Some(delivery) = dispatch::deliver_reply(task, check, label, text.as_deref(), host) {
-        model.set_message(dispatch::delivery_message(assignee, noun, &delivery));
+    let message = dispatch::closing_message(task).unwrap_or(dispatch::ClosingMessage {
+        label: "unblocked",
+        noun: "reply".to_string(),
+        text: None,
+        entries: 0,
+    });
+    let text = message.text.as_deref();
+    if let Some(delivery) = dispatch::deliver_reply(task, check, message.label, text, host) {
+        model.set_message(dispatch::delivery_message(
+            "started",
+            assignee,
+            &message.noun,
+            &delivery,
+        ));
+    }
+}
+
+/// The tasks among `ids` that hold an open record and a dispatched agent, each with how many
+/// records it has closed so far, so a delivery after the save knows this change closed one.
+fn closing_candidates(
+    domain: &DomainState,
+    ids: impl IntoIterator<Item = uuid::Uuid>,
+) -> Vec<(uuid::Uuid, usize)> {
+    ids.into_iter()
+        .filter_map(|id| domain.get(id))
+        .filter(|task| task.block.is_some() && task.assignee.is_some() && task.dispatch.is_some())
+        .map(|task| (task.id, task.past_blocks.len()))
+        .collect()
+}
+
+/// After a status change outside the reply box lands: send each `candidates` task whose open
+/// record this change closed what that record owes its running agent
+/// ([`dispatch::closing_message`]). A block left for ready sends only when it holds replies;
+/// a start always sends, as the box's `ctrl+s` does. Returns the status-row line saying how
+/// it went, if anything was tried.
+fn deliver_closed_records(
+    domain: &DomainState,
+    candidates: &[(uuid::Uuid, usize)],
+    in_herdr: bool,
+    host: &mut impl DispatchHost,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut summary = crate::app::ClosingSummary::default();
+    for (id, closed_before) in candidates {
+        let Some(task) = domain.get(*id) else {
+            continue;
+        };
+        let closed_now = task.past_blocks.len() == closed_before + 1
+            && task
+                .past_blocks
+                .last()
+                .is_some_and(|record| record.closed_by.as_deref() == Some(crate::domain::OWNER));
+        let Some(message) = closed_now
+            .then(|| dispatch::closing_message(task))
+            .flatten()
+        else {
+            continue;
+        };
+        if task.status == HumanStatus::Ready && message.entries == 0 {
+            continue;
+        }
+        let Some(assignee) = task.assignee.as_deref() else {
+            continue;
+        };
+        let (_, check) = dispatch::start_route_checked(task, crate::domain::OWNER, in_herdr, host);
+        let text = message.text.as_deref();
+        if let Some(delivery) = dispatch::deliver_reply(task, &check, message.label, text, host) {
+            let status = if task.status == HumanStatus::Ready {
+                "ready"
+            } else {
+                "started"
+            };
+            summary.add(status, &message, &delivery);
+            lines.push(dispatch::delivery_message(
+                status,
+                assignee,
+                &message.noun,
+                &delivery,
+            ));
+        }
+    }
+    match lines.len() {
+        0 => None,
+        1 => lines.pop(),
+        _ => Some(summary.line()),
+    }
+}
+
+/// Several closing deliveries at once, counted for one status-row line.
+#[derive(Default)]
+struct ClosingSummary {
+    status: &'static str,
+    /// Agents a send-back reached, and the feedback entries it carried.
+    sent_back: (usize, usize),
+    /// Agents an unblock reached, and the replies it carried.
+    unblocked: (usize, usize),
+    not_sent: usize,
+}
+
+impl ClosingSummary {
+    fn add(
+        &mut self,
+        status: &'static str,
+        message: &dispatch::ClosingMessage,
+        delivery: &dispatch::Delivery,
+    ) {
+        if self.status.is_empty() {
+            self.status = status;
+        }
+        let kind = if message.label == "sent back" {
+            &mut self.sent_back
+        } else {
+            &mut self.unblocked
+        };
+        if *delivery == dispatch::Delivery::Sent {
+            kind.0 += 1;
+            kind.1 += message.entries;
+        } else {
+            self.not_sent += 1;
+        }
+    }
+
+    /// `started · sent back to 2 agents with 3 feedback entries · 2 replies sent to 1 agent ·
+    /// 1 not sent, kept on its task`.
+    fn line(&self) -> String {
+        let mut parts = vec![self.status.to_string()];
+        let (agents, entries) = self.sent_back;
+        if agents > 0 {
+            parts.push(match entries {
+                0 => format!("sent back to {}", plural(agents, "agent")),
+                1 => format!(
+                    "sent back to {} with 1 feedback entry",
+                    plural(agents, "agent")
+                ),
+                entries => format!(
+                    "sent back to {} with {entries} feedback entries",
+                    plural(agents, "agent")
+                ),
+            });
+        }
+        let (agents, entries) = self.unblocked;
+        if agents > 0 {
+            parts.push(match entries {
+                0 => format!("unblocked {}", plural(agents, "agent")),
+                1 => format!("1 reply sent to {}", plural(agents, "agent")),
+                entries => format!("{entries} replies sent to {}", plural(agents, "agent")),
+            });
+        }
+        match self.not_sent {
+            0 => {}
+            1 => parts.push("1 not sent, kept on its task".to_string()),
+            count => parts.push(format!("{count} not sent, kept on their tasks")),
+        }
+        parts.join(" · ")
     }
 }
 
@@ -3448,7 +3586,9 @@ fn deliver_reply_after_start(
 /// board with the rule the card was opened under: a row that no longer moves (started, done,
 /// archived, deleted, or out of `ctrl+s`'s open/ready) is left alone, and a row that now
 /// needs a launch the card did not show (assigned meanwhile) is refused on the status row.
-/// Returns the refusals, or `None` when the save failed into recovery.
+/// A block or review round a row leaves is delivered to its running agent once the save lands
+/// ([`deliver_closed_records`]), or held for save recovery's Retry.
+/// Returns the refusals and the delivery line, or `None` when the save failed into recovery.
 #[allow(clippy::too_many_arguments)]
 fn start_plain_and_save(
     store: &TaskStore,
@@ -3461,7 +3601,8 @@ fn start_plain_and_save(
     any_status: bool,
     undoable: bool,
     in_herdr: bool,
-) -> Option<Vec<String>> {
+    host: &mut impl DispatchHost,
+) -> Option<PlainStart> {
     let mut moving = Vec::new();
     let mut refused = Vec::new();
     for id in ids {
@@ -3493,8 +3634,12 @@ fn start_plain_and_save(
         ));
     }
     if moving.is_empty() {
-        return Some(refused);
+        return Some(PlainStart {
+            refused,
+            delivered: None,
+        });
     }
+    let closing = closing_candidates(domain, moving.iter().copied());
     let started = if undoable {
         domain.start_batch(&moving)
     } else {
@@ -3505,15 +3650,41 @@ fn start_plain_and_save(
     };
     if let Err(error) = started {
         model.set_message(board_rejection_message(&error));
-        return Some(refused);
+        return Some(PlainStart {
+            refused,
+            delivered: None,
+        });
     }
     if let Err(error) = store.reload_merge_save(domain) {
         fail_board_save(domain, model, save_recovery, baseline, error.to_string());
+        model.pending_closing.extend(closing);
         return None;
     }
     model.sync_from_domain(domain);
     record_notice_dismissals_without_blocking_persist(store, domain);
-    Some(refused)
+    let delivered = deliver_closed_records(domain, &closing, in_herdr, host);
+    if let Some(line) = &delivered {
+        model.set_message(line.clone());
+    }
+    Some(PlainStart { refused, delivered })
+}
+
+/// What [`start_plain_and_save`] did once its save landed.
+struct PlainStart {
+    /// Rows refused because they were assigned since the card opened.
+    refused: Vec<String>,
+    /// The status-row line for what went to running agents, if anything was tried.
+    delivered: Option<String>,
+}
+
+impl PlainStart {
+    /// `message`, followed by the delivery line when there is one.
+    fn with_delivery(&self, message: String) -> String {
+        match &self.delivered {
+            Some(line) => format!("{message} · {line}"),
+            None => message,
+        }
+    }
 }
 
 const BULK_DISPATCH_RUNNING: &str = "a bulk dispatch is still running";
@@ -3719,6 +3890,8 @@ fn start_bulk_dispatch(
         return Ok(());
     }
     let mut start_refused = Vec::new();
+    // What the start-only rows sent their running agents, said after the launches report.
+    let mut delivered = None;
     if !prompt.start_only.is_empty() {
         let ids = prompt
             .start_only
@@ -3727,7 +3900,7 @@ fn start_bulk_dispatch(
             .collect::<Vec<_>>();
         model.clear_marks();
         let before = domain.clone();
-        let Some(refused) = start_plain_and_save(
+        let Some(started) = start_plain_and_save(
             store,
             domain,
             model,
@@ -3738,28 +3911,31 @@ fn start_bulk_dispatch(
             prompt.any_status,
             true,
             in_herdr,
+            host,
         ) else {
             return Ok(());
         };
+        let refused = &started.refused;
         if prompt.launch.is_empty() {
-            let started = ids
+            let moved = ids
                 .iter()
                 .filter(|id| {
                     domain.get(**id).map(|task| task.status)
                         != before.get(**id).map(|task| task.status)
                 })
                 .count();
-            let mut message = format!("started {}", plural(started, "task"));
+            let mut message = format!("started {}", plural(moved, "task"));
             if !refused.is_empty() {
                 message.push_str(&format!(
                     " · not started: {} assigned since the card opened",
                     refused.join(", ")
                 ));
             }
-            model.set_message(message);
+            model.set_message(started.with_delivery(message));
             return Ok(());
         }
-        start_refused = refused;
+        start_refused = started.refused.clone();
+        delivered = started.delivered;
     }
     let profiles = match AgentProfiles::load(store.path()) {
         Ok(profiles) => profiles,
@@ -3790,7 +3966,15 @@ fn start_bulk_dispatch(
     model.set_message(run.message());
     model.begin_bulk_dispatch(run);
     // A host that launched inline has every outcome ready now.
-    land_bulk_dispatch_with_host(store, domain, model, save_recovery, name_agent)
+    land_bulk_dispatch_with_host(store, domain, model, save_recovery, name_agent)?;
+    if let Some(line) = delivered {
+        let message = model.message().map(str::to_string);
+        model.set_message(match message {
+            Some(message) => format!("{message} · {line}"),
+            None => line,
+        });
+    }
+    Ok(())
 }
 
 /// A launch whose record is durable: count it and name its agent.
@@ -4308,6 +4492,7 @@ fn handle_board_intent_with_host(
                 relaunch.any_status,
                 false,
                 in_herdr,
+                host,
             );
         }
         return Ok(false);
@@ -4367,13 +4552,9 @@ fn handle_board_intent_with_host(
     // then dispatches, or asks before relaunching a gone agent.
     let mut after_reply = None;
     let mut reply_no_launch = None;
-    // A plain start because the agent still runs: the reply goes to it once the start is
-    // durable. Shift+Enter (save only) never sends.
+    // A plain start because the agent still runs: the record's replies go to it once the
+    // start is durable. Shift+Enter (save only) never sends; the record's close sends them all.
     let mut deliver_to = None;
-    // Only the reply this action stores is ever sent, never earlier ones.
-    let mut reply_text = (intent == BoardIntent::ReplySaveUnblock && !save_recovery.is_pending())
-        .then(|| model.reply_draft().map(|draft| draft.trim().to_string()))
-        .flatten();
     let intent = if intent == BoardIntent::ReplySaveUnblock && !save_recovery.is_pending() {
         // Route against the durable record: an assignment made elsewhere must launch.
         domain.merge_tasks_from_disk(&baseline);
@@ -4401,6 +4582,19 @@ fn handle_board_intent_with_host(
         }
     } else {
         intent
+    };
+
+    // Leaving a block outside the reply box (`ctrl+b`, palette set status) sends the agent the
+    // block's replies once the change is durable, like the box's `ctrl+s`.
+    let mut closing = if !save_recovery.is_pending()
+        && matches!(
+            intent,
+            BoardIntent::ToggleBlock
+                | BoardIntent::SetStatus(HumanStatus::Ready | HumanStatus::Started)
+        ) {
+        closing_candidates(domain, model.verb_target_ids())
+    } else {
+        Vec::new()
     };
 
     let resolves_recovery = match intent {
@@ -4445,27 +4639,22 @@ fn handle_board_intent_with_host(
     // A reply whose save failed keeps its start for save recovery: Retry resumes it, Cancel
     // drops it with the rolled-back reply.
     // A delivery waits on the same recovery: Retry sends it once, against a fresh check.
-    let mut resumed_check = dispatch::AgentCheck::NotChecked;
+    // So does a status change outside the box that closed a record.
     match resolves_recovery {
         Some(false) => {
             model.pending_reply_start = None;
             model.pending_reply_delivery = None;
-            model.pending_reply_text = None;
+            model.pending_closing.clear();
         }
         Some(true) if outcome == IntentOutcome::Persisted && !save_recovery.is_pending() => {
-            reply_text = model.pending_reply_text.take();
+            closing.append(&mut model.pending_closing);
             if let Some(target) = model.pending_reply_start.take() {
                 after_reply = domain
                     .get(target)
                     .filter(|task| task.assignee.is_some() && !task.archived)
                     .map(|task| {
-                        let (route, check) = dispatch::start_route_checked(
-                            task,
-                            crate::domain::OWNER,
-                            in_herdr,
-                            host,
-                        );
-                        resumed_check = check;
+                        let route =
+                            dispatch::start_route(task, crate::domain::OWNER, in_herdr, host);
                         (target, route)
                     });
             }
@@ -4486,11 +4675,7 @@ fn handle_board_intent_with_host(
         if let Some((target, _)) = deliver_to.take() {
             model.pending_reply_delivery = Some(target);
         }
-        if model.pending_reply_start.is_some() || model.pending_reply_delivery.is_some() {
-            if let Some(text) = reply_text.take() {
-                model.pending_reply_text = Some(text);
-            }
-        }
+        model.pending_closing.append(&mut closing);
     }
     if outcome == IntentOutcome::Persisted {
         record_notice_dismissals_without_blocking_persist(store, domain);
@@ -4498,7 +4683,12 @@ fn handle_board_intent_with_host(
             model.set_message(dispatch::no_launch_message(reason));
         }
         if let Some((target, check)) = deliver_to.take() {
-            deliver_reply_after_start(domain, model, target, &check, reply_text.as_deref(), host);
+            deliver_reply_after_start(domain, model, target, &check, host);
+        }
+        if !save_recovery.is_pending() {
+            if let Some(line) = deliver_closed_records(domain, &closing, in_herdr, host) {
+                model.set_message(line);
+            }
         }
         if let Some((target, route)) = after_reply.filter(|_| !save_recovery.is_pending()) {
             match route {
@@ -4507,7 +4697,7 @@ fn handle_board_intent_with_host(
                     open_relaunch_card(domain, model, target, assignee, true);
                 }
                 // Only a resumed start lands here: its agent turned out to be running, or
-                // dispatch cannot work here.
+                // dispatch cannot work here. The start sends the closed record's replies.
                 dispatch::StartRoute::Plain | dispatch::StartRoute::NoLaunch { .. } => {
                     let Some(baseline) = load_baseline(store, model)? else {
                         return Ok(false);
@@ -4523,22 +4713,10 @@ fn handle_board_intent_with_host(
                         true,
                         false,
                         in_herdr,
+                        host,
                     );
-                    match (started, route) {
-                        (Some(_), dispatch::StartRoute::NoLaunch { reason }) => {
-                            model.set_message(dispatch::no_launch_message(reason));
-                        }
-                        (Some(_), _) if !save_recovery.is_pending() => {
-                            deliver_reply_after_start(
-                                domain,
-                                model,
-                                target,
-                                &resumed_check,
-                                reply_text.as_deref(),
-                                host,
-                            );
-                        }
-                        _ => {}
+                    if let (Some(_), dispatch::StartRoute::NoLaunch { reason }) = (started, route) {
+                        model.set_message(dispatch::no_launch_message(reason));
                     }
                 }
                 dispatch::StartRoute::Dispatch => {
@@ -11030,6 +11208,19 @@ mod quick_assign_tests {
         id: uuid::Uuid,
         status: HumanStatus,
     ) {
+        dispatched_in(temp, domain, model, id, status, "w0");
+    }
+
+    /// [`dispatched_before`] into Herdr workspace `workspace`, so several dispatched tasks
+    /// each have their own root pane (`<workspace>:p1`).
+    fn dispatched_in(
+        temp: &Temp,
+        domain: &mut DomainState,
+        model: &mut BoardModel,
+        id: uuid::Uuid,
+        status: HumanStatus,
+        workspace: &str,
+    ) {
         domain
             .assign(id, Some("builder".into()))
             .expect("assign builder");
@@ -11045,7 +11236,7 @@ mod quick_assign_tests {
                     base_ref: None,
                     base_commit: None,
                     base_remote: None,
-                    herdr_workspace_id: "w0".into(),
+                    herdr_workspace_id: workspace.into(),
                     at: std::time::SystemTime::now(),
                     cleaned: false,
                 },
@@ -11055,6 +11246,599 @@ mod quick_assign_tests {
         domain.set_status(id, status).expect("status");
         temp.store.reload_merge_save(domain).expect("save");
         model.sync_from_domain(domain);
+    }
+
+    /// Unblocking with the reply box's `ctrl+s` sends every reply you left on the block,
+    /// oldest first: one saved earlier with `Shift+Enter`, then the box's. A deleted reply is
+    /// skipped and an edited one sends its current text.
+    #[test]
+    fn unblocking_sends_every_reply_of_the_block() {
+        let temp = Temp::new("unblock-all-replies", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["agent asks"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+        blocked_row(&temp, &mut domain, &mut model, ids[0]);
+        let first = domain
+            .reply(ids[0], "mysql?", crate::domain::OWNER)
+            .expect("reply");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        domain
+            .edit_reply(ids[0], first, "sqlite?")
+            .expect("edit reply");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        let dropped = domain
+            .reply(ids[0], "never mind", crate::domain::OWNER)
+            .expect("reply");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        domain.delete_reply(ids[0], dropped).expect("delete");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        let mut host = fake_host(&temp);
+        agent_running(&domain, &mut host, ids[0]);
+        apply_intent(&mut domain, &mut model, BoardIntent::BeginReply, None).expect("r");
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::EditInsertText("postgres".into()),
+            None,
+        )
+        .expect("type");
+        let save = key(&model, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(save, BoardIntent::ReplySaveUnblock);
+        handle(&temp, &mut domain, &mut model, save, &mut host);
+        assert_eq!(
+            host.prompts,
+            [(
+                "w0:p1".to_string(),
+                "[tsk T1 unblocked] 1. sqlite?\n2. postgres".to_string()
+            )]
+        );
+        assert_eq!(
+            model.message(),
+            Some("started · 2 replies sent to @builder")
+        );
+    }
+
+    /// `ctrl+b` returns a blocked task to ready and sends its running agent the block's
+    /// replies, saved earlier with `Shift+Enter`. A block with no reply of yours sends nothing.
+    #[test]
+    fn ctrl_b_unblock_sends_the_blocks_replies() {
+        for replied in [true, false] {
+            let temp = Temp::new("ctrl-b-unblock-replies", &["builder"]);
+            let (mut domain, mut model, ids) = board(&temp, &["agent asks"]);
+            dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+            blocked_row(&temp, &mut domain, &mut model, ids[0]);
+            if replied {
+                domain
+                    .reply(ids[0], "use postgres", crate::domain::OWNER)
+                    .expect("reply");
+                temp.store.reload_merge_save(&mut domain).expect("save");
+                model.sync_from_domain(&domain);
+            }
+            let mut host = fake_host(&temp);
+            agent_running(&domain, &mut host, ids[0]);
+            let unblock = key(&model, KeyCode::Char('b'), KeyModifiers::CONTROL);
+            assert_eq!(unblock, BoardIntent::ToggleBlock);
+            handle(&temp, &mut domain, &mut model, unblock, &mut host);
+            let saved = temp.store.load().expect("reload");
+            assert_eq!(saved.get(ids[0]).expect("task").status, HumanStatus::Ready);
+            if replied {
+                assert_eq!(
+                    host.prompts,
+                    [(
+                        "w0:p1".to_string(),
+                        "[tsk T1 unblocked] use postgres".to_string()
+                    )]
+                );
+                assert_eq!(model.message(), Some("ready · reply sent to @builder"));
+            } else {
+                assert_eq!(host.prompts, [], "nothing to send");
+            }
+        }
+    }
+
+    /// Your `entries` on `id`'s open record, one save each, then one more you deleted.
+    fn saved_entries(
+        temp: &Temp,
+        domain: &mut DomainState,
+        model: &mut BoardModel,
+        id: uuid::Uuid,
+        entries: &[&str],
+    ) {
+        for entry in entries {
+            domain
+                .reply(id, entry, crate::domain::OWNER)
+                .expect("entry");
+            temp.store.reload_merge_save(domain).expect("save");
+        }
+        let dropped = domain
+            .reply(id, "scratch that", crate::domain::OWNER)
+            .expect("entry");
+        temp.store.reload_merge_save(domain).expect("save");
+        domain.delete_reply(id, dropped).expect("delete");
+        temp.store.reload_merge_save(domain).expect("save");
+        model.sync_from_domain(domain);
+    }
+
+    /// Put `id` in review with one failed check, `no flicker`.
+    fn in_review_with_a_failed_check(
+        temp: &Temp,
+        domain: &mut DomainState,
+        model: &mut BoardModel,
+        id: uuid::Uuid,
+    ) {
+        domain
+            .review(
+                id,
+                crate::domain::ReviewDraft::from_input(
+                    Some("built it"),
+                    &["no flicker".to_string()],
+                    None,
+                    Default::default(),
+                )
+                .expect("draft"),
+                "builder",
+            )
+            .expect("review");
+        temp.store.reload_merge_save(domain).expect("save");
+        domain
+            .set_check(id, 0, crate::domain::CheckState::Failed)
+            .expect("fail");
+        temp.store.reload_merge_save(domain).expect("save");
+        model.sync_from_domain(domain);
+    }
+
+    /// The dispatched agent of task `id` runs, under its dispatch name, in `workspace`'s root
+    /// pane.
+    fn agent_running_in(
+        domain: &DomainState,
+        host: &mut FakeHost,
+        id: uuid::Uuid,
+        workspace: &str,
+    ) {
+        let number = domain.get(id).and_then(|task| task.number).expect("number");
+        host.agent = Some(true);
+        host.names.insert(
+            format!("{workspace}:p1"),
+            crate::dispatch::agent_name(number, "builder"),
+        );
+    }
+
+    /// The brief's proof: a send-back carries two entries saved earlier with `Shift+Enter` and
+    /// the box's text, in order, skipping one you deleted, then the failed checks.
+    #[test]
+    fn a_send_back_delivers_two_saved_entries_and_the_box_skipping_a_deleted_one() {
+        let temp = Temp::new("send-back-proof", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["review me"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+        review_page(&temp, &mut domain, &mut model, ids[0], &["no flicker"]);
+        domain
+            .set_check(ids[0], 0, crate::domain::CheckState::Failed)
+            .expect("fail");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        saved_entries(&temp, &mut domain, &mut model, ids[0], &["first", "second"]);
+        let mut host = fake_host(&temp);
+        agent_running(&domain, &mut host, ids[0]);
+        apply_intent(&mut domain, &mut model, BoardIntent::BeginReply, None).expect("r");
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::EditInsertText("third".into()),
+            None,
+        )
+        .expect("type");
+        let send = page_key(
+            &temp,
+            &mut domain,
+            &mut model,
+            &mut host,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        );
+        assert_eq!(send, BoardIntent::ReplySaveUnblock);
+        assert_eq!(
+            host.prompts,
+            [(
+                "w0:p1".to_string(),
+                "[tsk T1 sent back] 1. first\n2. second\n3. third\nFailed checks: no flicker"
+                    .to_string()
+            )]
+        );
+        assert_eq!(
+            model.message(),
+            Some("started · 3 feedback entries sent to @builder")
+        );
+    }
+
+    /// Palette **set status: ready** or **started** on a blocked task, and **started** on a
+    /// review, send the closed record to the running agent, as the reply box's `ctrl+s` does.
+    #[test]
+    fn palette_status_changes_deliver_the_closed_record() {
+        for (status, word) in [
+            (HumanStatus::Ready, "ready"),
+            (HumanStatus::Started, "started"),
+        ] {
+            let temp = Temp::new("palette-unblock", &["builder"]);
+            let (mut domain, mut model, ids) = board(&temp, &["agent asks"]);
+            dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+            blocked_row(&temp, &mut domain, &mut model, ids[0]);
+            saved_entries(
+                &temp,
+                &mut domain,
+                &mut model,
+                ids[0],
+                &["use postgres", "add an index"],
+            );
+            select(&mut domain, &mut model, ids[0]);
+            let mut host = fake_host(&temp);
+            agent_running(&domain, &mut host, ids[0]);
+            handle(
+                &temp,
+                &mut domain,
+                &mut model,
+                BoardIntent::SetStatus(status),
+                &mut host,
+            );
+            assert_eq!(
+                temp.store
+                    .load()
+                    .expect("load")
+                    .get(ids[0])
+                    .expect("task")
+                    .status,
+                status
+            );
+            assert_eq!(
+                host.prompts,
+                [(
+                    "w0:p1".to_string(),
+                    "[tsk T1 unblocked] 1. use postgres\n2. add an index".to_string()
+                )],
+                "{word}"
+            );
+            assert_eq!(
+                model.message().map(str::to_string),
+                Some(format!("{word} · 2 replies sent to @builder"))
+            );
+        }
+
+        let temp = Temp::new("palette-send-back", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["review me"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+        in_review_with_a_failed_check(&temp, &mut domain, &mut model, ids[0]);
+        saved_entries(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[0],
+            &["fix the peak", "and the dip"],
+        );
+        select(&mut domain, &mut model, ids[0]);
+        let mut host = fake_host(&temp);
+        agent_running(&domain, &mut host, ids[0]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::SetStatus(HumanStatus::Started),
+            &mut host,
+        );
+        assert_eq!(
+            host.prompts,
+            [(
+                "w0:p1".to_string(),
+                "[tsk T1 sent back] 1. fix the peak\n2. and the dip\nFailed checks: no flicker"
+                    .to_string()
+            )]
+        );
+        assert_eq!(
+            model.message(),
+            Some("started · 2 feedback entries sent to @builder")
+        );
+    }
+
+    /// A marked start that opens the bulk card: its start-only rows (a review and a block,
+    /// each with a running agent) send their closed records once the start is saved, next to
+    /// the launch of the never-dispatched row. The status row counts what went out.
+    #[test]
+    fn a_marked_start_through_the_card_delivers_each_closed_record() {
+        let temp = Temp::new("closing-bulk-card", &["builder"]);
+        let (mut domain, mut model, ids) =
+            board(&temp, &["in review", "blocked", "never launched"]);
+        dispatched_in(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[0],
+            HumanStatus::Started,
+            "w5",
+        );
+        in_review_with_a_failed_check(&temp, &mut domain, &mut model, ids[0]);
+        saved_entries(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[0],
+            &["fix the peak", "and the dip"],
+        );
+        dispatched_in(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[1],
+            HumanStatus::Started,
+            "w6",
+        );
+        blocked_row(&temp, &mut domain, &mut model, ids[1]);
+        saved_entries(&temp, &mut domain, &mut model, ids[1], &["use postgres"]);
+        domain
+            .assign(ids[2], Some("builder".into()))
+            .expect("assign");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        let mut host = fake_host(&temp);
+        agent_running_in(&domain, &mut host, ids[0], "w5");
+        agent_running_in(&domain, &mut host, ids[1], "w6");
+        apply_intent(&mut domain, &mut model, BoardIntent::ToggleMarkMode, None).expect("mark");
+        for id in &ids {
+            select(&mut domain, &mut model, *id);
+            apply_intent(&mut domain, &mut model, BoardIntent::MarkToggle, None).expect("mark");
+        }
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::SetStatus(HumanStatus::Started),
+            &mut host,
+        );
+        let prompt = model.dispatch_prompt().expect("bulk card").clone();
+        assert_eq!(prompt.launch.len(), 1);
+        assert_eq!(prompt.start_only.len(), 2);
+        assert!(
+            host.prompts.is_empty(),
+            "nothing before the card is confirmed"
+        );
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmDispatch,
+            &mut host,
+        );
+        assert_eq!(host.ran, 1, "the never-dispatched row launches");
+        let mut prompts = host.prompts.clone();
+        prompts.sort();
+        assert_eq!(
+            prompts,
+            [
+                (
+                    "w5:p1".to_string(),
+                    "[tsk T1 sent back] 1. fix the peak\n2. and the dip\nFailed checks: no flicker"
+                        .to_string()
+                ),
+                (
+                    "w6:p1".to_string(),
+                    "[tsk T2 unblocked] use postgres".to_string()
+                ),
+            ]
+        );
+        let message = model.message().expect("status row");
+        assert!(
+            message.ends_with(
+                "started · sent back to 1 agent with 2 feedback entries · 1 reply sent to 1 agent"
+            ),
+            "{message}"
+        );
+    }
+
+    /// A marked start where nothing launches but a row says why (a desk task): the plain batch
+    /// sends the review's closed round to its running agent, after the no-launch note.
+    #[test]
+    fn a_marked_no_launch_start_delivers_the_closed_record() {
+        let temp = Temp::new("closing-no-launch-batch", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["in review"]);
+        dispatched_in(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[0],
+            HumanStatus::Started,
+            "w5",
+        );
+        in_review_with_a_failed_check(&temp, &mut domain, &mut model, ids[0]);
+        saved_entries(&temp, &mut domain, &mut model, ids[0], &["fix the peak"]);
+        let desk = domain
+            .create_assigned(
+                "desk errand",
+                None,
+                TaskScope::Global,
+                ProvenanceOrigin::Manual,
+                None,
+                Some("builder".into()),
+            )
+            .expect("desk task");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        let mut model = BoardModel::from_domain(&domain, None);
+        model.set_agent_profiles(&temp.profiles());
+        let mut host = fake_host(&temp);
+        agent_running_in(&domain, &mut host, ids[0], "w5");
+        apply_intent(&mut domain, &mut model, BoardIntent::ToggleMarkMode, None).expect("mark");
+        for id in [ids[0], desk] {
+            select(&mut domain, &mut model, id);
+            apply_intent(&mut domain, &mut model, BoardIntent::MarkToggle, None).expect("mark");
+        }
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::SetStatus(HumanStatus::Started),
+            &mut host,
+        );
+        assert_eq!(model.dispatch_prompt(), None, "no card: nothing launches");
+        let saved = temp.store.load().expect("load");
+        assert_eq!(saved.get(desk).expect("desk").status, HumanStatus::Started);
+        assert_eq!(
+            host.prompts,
+            [(
+                "w5:p1".to_string(),
+                "[tsk T1 sent back] fix the peak Failed checks: no flicker".to_string()
+            )]
+        );
+        let message = model.message().expect("status row");
+        assert!(message.contains("no launch"), "{message}");
+        assert!(
+            message.ends_with(" · started · feedback sent to @builder"),
+            "{message}"
+        );
+    }
+
+    /// `n` on the relaunch card starts the task without relaunching. If the agent turns up
+    /// running by then (Herdr's detection lagged), it gets the block's replies.
+    #[test]
+    fn start_without_relaunch_delivers_to_an_agent_found_running() {
+        let temp = Temp::new("closing-start-without-relaunch", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["agent asks"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+        blocked_row(&temp, &mut domain, &mut model, ids[0]);
+        saved_entries(&temp, &mut domain, &mut model, ids[0], &["use postgres"]);
+        select(&mut domain, &mut model, ids[0]);
+        let mut host = fake_host(&temp);
+        host.agent = Some(false);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::SetStatus(HumanStatus::Started),
+            &mut host,
+        );
+        assert!(model
+            .dispatch_prompt()
+            .is_some_and(|prompt| prompt.relaunch.is_some()));
+        agent_running(&domain, &mut host, ids[0]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::StartWithoutRelaunch,
+            &mut host,
+        );
+        assert_eq!(host.ran, 0, "nothing relaunched");
+        assert_eq!(
+            temp.store
+                .load()
+                .expect("load")
+                .get(ids[0])
+                .expect("task")
+                .status,
+            HumanStatus::Started
+        );
+        assert_eq!(
+            host.prompts,
+            [(
+                "w0:p1".to_string(),
+                "[tsk T1 unblocked] use postgres".to_string()
+            )]
+        );
+        assert_eq!(model.message(), Some("started · reply sent to @builder"));
+    }
+
+    /// A single assigned task that cannot launch here (a desk task) starts plainly and says
+    /// why. It was never dispatched, so it has no agent to send its replies to.
+    #[test]
+    fn a_single_no_launch_start_sends_nothing() {
+        let temp = Temp::new("closing-single-no-launch", &["builder"]);
+        let mut domain = DomainState::new();
+        let desk = domain
+            .create_assigned(
+                "desk errand",
+                None,
+                TaskScope::Global,
+                ProvenanceOrigin::Manual,
+                None,
+                Some("builder".into()),
+            )
+            .expect("desk task");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        let mut model = BoardModel::from_domain(&domain, None);
+        model.set_agent_profiles(&temp.profiles());
+        blocked_row(&temp, &mut domain, &mut model, desk);
+        saved_entries(&temp, &mut domain, &mut model, desk, &["use postgres"]);
+        select(&mut domain, &mut model, desk);
+        let mut host = fake_host(&temp);
+        host.agent = Some(true);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::SetStatus(HumanStatus::Started),
+            &mut host,
+        );
+        assert_eq!(
+            temp.store
+                .load()
+                .expect("load")
+                .get(desk)
+                .expect("task")
+                .status,
+            HumanStatus::Started
+        );
+        assert!(host.prompts.is_empty());
+        assert_eq!(
+            model.message().map(str::to_string),
+            Some(dispatch::no_launch_message(dispatch::NO_LAUNCH_DESK))
+        );
+    }
+
+    /// Several deliveries at once count their entries and keep send-backs apart from unblocks.
+    #[test]
+    fn the_closing_summary_counts_entries_by_kind() {
+        let message = |label: &'static str, entries: usize| dispatch::ClosingMessage {
+            label,
+            noun: String::new(),
+            text: None,
+            entries,
+        };
+        let mut summary = crate::app::ClosingSummary::default();
+        summary.add(
+            "started",
+            &message("sent back", 2),
+            &dispatch::Delivery::Sent,
+        );
+        summary.add(
+            "started",
+            &message("sent back", 1),
+            &dispatch::Delivery::Sent,
+        );
+        summary.add(
+            "started",
+            &message("unblocked", 2),
+            &dispatch::Delivery::Sent,
+        );
+        summary.add(
+            "started",
+            &message("unblocked", 1),
+            &dispatch::Delivery::NotInPane,
+        );
+        assert_eq!(
+            summary.line(),
+            "started · sent back to 2 agents with 3 feedback entries · 2 replies sent to 1 agent \
+             · 1 not sent, kept on its task"
+        );
+        let mut summary = crate::app::ClosingSummary::default();
+        summary.add("ready", &message("unblocked", 0), &dispatch::Delivery::Sent);
+        summary.add(
+            "ready",
+            &message("unblocked", 1),
+            &dispatch::Delivery::AgentWaiting,
+        );
+        summary.add(
+            "ready",
+            &message("unblocked", 1),
+            &dispatch::Delivery::NotInHerdr,
+        );
+        assert_eq!(
+            summary.line(),
+            "ready · unblocked 1 agent · 2 not sent, kept on their tasks"
+        );
     }
 
     fn ctrl_s(model: &BoardModel) -> BoardIntent {
@@ -12388,7 +13172,9 @@ mod quick_assign_tests {
     }
 
     /// `ctrl+s` sends the review back: the round closes as sent back, the task starts, and the
-    /// running agent gets this feedback plus the failed checks, once.
+    /// running agent gets every feedback entry of the round, oldest first (one saved earlier
+    /// with `Shift+Enter`, then the box's), plus the failed checks, once. A deleted entry is
+    /// skipped.
     #[test]
     fn ctrl_s_sends_back_with_the_failed_checks_to_the_running_agent() {
         use crate::domain::CheckState::{Failed, Passed};
@@ -12407,10 +13193,21 @@ mod quick_assign_tests {
             temp.store.reload_merge_save(&mut domain).expect("save");
         }
         model.sync_from_domain(&domain);
-        // An earlier note of yours on this round is never re-sent.
+        // Feedback saved earlier in the round goes out with the send-back; a deleted one and
+        // an agent's own reply do not.
         domain
             .reply(ids[0], "earlier note", crate::domain::OWNER)
             .expect("note");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        let dropped = domain
+            .reply(ids[0], "dropped note", crate::domain::OWNER)
+            .expect("note");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        domain.delete_reply(ids[0], dropped).expect("delete");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        domain
+            .reply(ids[0], "agent aside", "builder")
+            .expect("agent");
         temp.store.reload_merge_save(&mut domain).expect("save");
         model.sync_from_domain(&domain);
         let mut host = fake_host(&temp);
@@ -12437,11 +13234,15 @@ mod quick_assign_tests {
             host.prompts,
             [(
                 "w0:p1".to_string(),
-                "[tsk T1 sent back] fix the flicker Failed checks: no flicker; docs build"
+                "[tsk T1 sent back] 1. earlier note\n2. fix the flicker\n\
+                 Failed checks: no flicker; docs build"
                     .to_string()
             )]
         );
-        assert_eq!(model.message(), Some("started · feedback sent to @builder"));
+        assert_eq!(
+            model.message(),
+            Some("started · 2 feedback entries sent to @builder")
+        );
         let saved = temp.store.load().expect("reload");
         let task = saved.get(ids[0]).expect("task");
         assert_eq!(task.status, HumanStatus::Started);
@@ -13875,7 +14676,6 @@ mod quick_assign_tests {
                 BoardIntent::SelectNext,
             );
             assert_eq!(model.pending_reply_delivery, None);
-            assert_eq!(model.pending_reply_text, None);
             let saved = temp.store.load().expect("reload");
             let task = saved.get(ids[0]).expect("task");
             if retry {
@@ -13891,6 +14691,167 @@ mod quick_assign_tests {
             } else {
                 assert!(host.prompts.is_empty(), "cancel sent nothing");
                 assert_eq!(task.status, HumanStatus::Blocked);
+            }
+        }
+    }
+
+    /// `ctrl+b` or palette set status ready/started on a blocked task whose save fails sends
+    /// nothing; Retry sends the block's replies exactly once, after the save, and Cancel never.
+    #[cfg(unix)]
+    #[test]
+    fn an_unblock_outside_the_box_whose_save_fails_delivers_on_retry_only() {
+        for intent in [
+            BoardIntent::ToggleBlock,
+            BoardIntent::SetStatus(HumanStatus::Ready),
+            BoardIntent::SetStatus(HumanStatus::Started),
+        ] {
+            for retry in [true, false] {
+                let temp = Temp::new("closing-recovery", &["builder"]);
+                let (mut domain, mut model, ids) = board(&temp, &["agent asks"]);
+                dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+                blocked_row(&temp, &mut domain, &mut model, ids[0]);
+                saved_entries(&temp, &mut domain, &mut model, ids[0], &["use postgres"]);
+                select(&mut domain, &mut model, ids[0]);
+                let mut host = fake_host(&temp);
+                let tag = agent_running(&domain, &mut host, ids[0]);
+                let mut recovery = SaveRecovery::new();
+                failing_step(
+                    &temp,
+                    &mut domain,
+                    &mut model,
+                    &mut recovery,
+                    &mut host,
+                    intent.clone(),
+                );
+                assert!(
+                    host.prompts.is_empty(),
+                    "{intent:?}: nothing before the save"
+                );
+                let answer = if retry {
+                    BoardIntent::RetrySave
+                } else {
+                    BoardIntent::CancelSave
+                };
+                recovering_step(
+                    &temp,
+                    &mut domain,
+                    &mut model,
+                    &mut recovery,
+                    &mut host,
+                    answer,
+                );
+                assert!(!recovery.is_pending());
+                // A later save must not send again.
+                recovering_step(
+                    &temp,
+                    &mut domain,
+                    &mut model,
+                    &mut recovery,
+                    &mut host,
+                    BoardIntent::SelectNext,
+                );
+                assert!(model.pending_closing.is_empty(), "{intent:?}");
+                let status = temp
+                    .store
+                    .load()
+                    .expect("reload")
+                    .get(ids[0])
+                    .expect("task")
+                    .status;
+                if retry {
+                    assert_eq!(
+                        host.prompts,
+                        [("w0:p1".to_string(), format!("{tag} use postgres"))],
+                        "{intent:?}"
+                    );
+                    let expected = if intent == BoardIntent::SetStatus(HumanStatus::Started) {
+                        HumanStatus::Started
+                    } else {
+                        HumanStatus::Ready
+                    };
+                    assert_eq!(status, expected, "{intent:?}");
+                } else {
+                    assert!(host.prompts.is_empty(), "{intent:?}: cancel sent nothing");
+                    assert_eq!(status, HumanStatus::Blocked, "{intent:?}");
+                }
+            }
+        }
+    }
+
+    /// A marked start through the bulk card whose save fails sends nothing; Retry sends each
+    /// closed record once, Cancel never.
+    #[cfg(unix)]
+    #[test]
+    fn a_marked_start_whose_save_fails_delivers_on_retry_only() {
+        for retry in [true, false] {
+            let temp = Temp::new("closing-bulk-recovery", &["builder"]);
+            let (mut domain, mut model, ids) = board(&temp, &["in review", "never launched"]);
+            dispatched_in(
+                &temp,
+                &mut domain,
+                &mut model,
+                ids[0],
+                HumanStatus::Started,
+                "w5",
+            );
+            in_review_with_a_failed_check(&temp, &mut domain, &mut model, ids[0]);
+            saved_entries(&temp, &mut domain, &mut model, ids[0], &["fix the peak"]);
+            domain
+                .assign(ids[1], Some("builder".into()))
+                .expect("assign");
+            temp.store.reload_merge_save(&mut domain).expect("save");
+            model.sync_from_domain(&domain);
+            let mut host = fake_host(&temp);
+            agent_running_in(&domain, &mut host, ids[0], "w5");
+            apply_intent(&mut domain, &mut model, BoardIntent::ToggleMarkMode, None).expect("mark");
+            for id in &ids {
+                select(&mut domain, &mut model, *id);
+                apply_intent(&mut domain, &mut model, BoardIntent::MarkToggle, None).expect("mark");
+            }
+            let mut recovery = SaveRecovery::new();
+            recovering_step(
+                &temp,
+                &mut domain,
+                &mut model,
+                &mut recovery,
+                &mut host,
+                BoardIntent::SetStatus(HumanStatus::Started),
+            );
+            assert!(model.dispatch_prompt().is_some(), "bulk card");
+            failing_step(
+                &temp,
+                &mut domain,
+                &mut model,
+                &mut recovery,
+                &mut host,
+                BoardIntent::ConfirmDispatch,
+            );
+            assert!(host.prompts.is_empty(), "nothing before the save");
+            let answer = if retry {
+                BoardIntent::RetrySave
+            } else {
+                BoardIntent::CancelSave
+            };
+            recovering_step(
+                &temp,
+                &mut domain,
+                &mut model,
+                &mut recovery,
+                &mut host,
+                answer,
+            );
+            assert!(!recovery.is_pending());
+            assert!(model.pending_closing.is_empty());
+            if retry {
+                assert_eq!(
+                    host.prompts,
+                    [(
+                        "w5:p1".to_string(),
+                        "[tsk T1 sent back] fix the peak Failed checks: no flicker".to_string()
+                    )]
+                );
+            } else {
+                assert!(host.prompts.is_empty(), "cancel sent nothing");
             }
         }
     }

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::cli::parser::TaskAddress;
 use crate::dispatch::{self, Delivery, DispatchHost, StartRoute};
-use crate::domain::{actor_from_env, DomainError, DomainState, OWNER};
+use crate::domain::{actor_from_env, BlockKey, DomainError, DomainState, OWNER};
 use crate::store::{default_state_dir, TaskStore};
 
 /// A stored reply.
@@ -15,6 +15,10 @@ pub struct ReplyResult {
     pub number: u64,
     pub title: String,
     pub by: String,
+    /// The reply's index on its record.
+    pub index: usize,
+    /// The record (block or review round) the reply was stored on.
+    pub record: BlockKey,
 }
 
 /// A reply failure after parsing and before presenting output.
@@ -79,7 +83,9 @@ impl SendOutcome {
 }
 
 /// `tsk reply --send`: store the reply, then deliver that reply (and only it) to the task's
-/// running dispatched agent. The task stays blocked.
+/// running dispatched agent. The task stays blocked. A reply that went out is marked sent, so
+/// the record's unblock or send-back does not deliver it again; one that did not stays unsent
+/// and goes out then.
 pub fn run_send(
     target: TaskAddress,
     text: &str,
@@ -113,6 +119,24 @@ pub fn run_send_with_host(
         },
         Err(error) => SendOutcome::Skipped(format!("could not read the board: {error}")),
     };
+    if matches!(outcome, SendOutcome::Sent { .. }) {
+        // Best effort on purpose: if this fails, the record's close sends the reply once
+        // more, never loses it. Bound to the record the reply was stored on, since the lock
+        // was released in between.
+        let _ = store.locked_transition_if_changed(|state: &mut DomainState| {
+            let id = state
+                .tasks()
+                .iter()
+                .find(|task| target.matches(task))
+                .map(|task| task.id);
+            let marked = id
+                .map(|id| state.mark_reply_sent(id, &result.record, result.index, text.trim()))
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or(false);
+            Ok(((), marked))
+        });
+    }
     Ok((result, outcome))
 }
 
@@ -188,11 +212,17 @@ fn apply(
         return (Err(ReplyError::SoftDeletedTask), false);
     }
     match state.reply(id, text, by) {
-        Ok(_) => (
+        Ok(index) => (
             Ok(ReplyResult {
                 number,
                 title,
                 by: by.to_string(),
+                index,
+                record: state
+                    .get(id)
+                    .and_then(|task| task.block.as_ref())
+                    .map(|block| block.key())
+                    .expect("a stored reply has its record"),
             }),
             true,
         ),
@@ -211,11 +241,12 @@ mod tests {
 
     use super::{run_send_with_host, SendOutcome};
     use crate::cli::parser::TaskAddress;
+    use crate::cli::status::{StartFlags, StartOutcome};
     use crate::dispatch::{
         CreatedWorktree, Delivery, DispatchHost, PaneAgent, PromptError, RootPaneError,
     };
     use crate::domain::{
-        BlockDraft, Dispatch, DomainState, HumanStatus, ProvenanceOrigin, TaskScope,
+        BlockDraft, Dispatch, DomainState, HumanStatus, ProvenanceOrigin, ReviewDraft, TaskScope,
     };
     use crate::store::TaskStore;
 
@@ -311,6 +342,9 @@ mod tests {
         state: Option<PathBuf>,
         /// Replies on disk (the task's open block) when each prompt was submitted.
         disk_at_prompt: Vec<Vec<String>>,
+        /// While the prompt is in flight, the owner unblocks the task, the agent blocks it
+        /// again, and the owner replies the same text: a new record, same reply index.
+        reopen_at_prompt: bool,
     }
 
     impl DispatchHost for Host {
@@ -362,6 +396,20 @@ mod tests {
                         .flat_map(|block| block.replies.iter().map(|reply| reply.text.clone()))
                         .collect(),
                 );
+            }
+            if self.reopen_at_prompt {
+                let store = TaskStore::new(self.state.as_ref().expect("state"));
+                let mut state = store.load().expect("load at prompt");
+                let id = state.tasks()[0].id;
+                state.set_status(id, HumanStatus::Ready).expect("unblock");
+                store.reload_merge_save(&mut state).expect("save");
+                let draft =
+                    BlockDraft::from_input(Some("which db now?"), None, &[], Default::default())
+                        .expect("draft");
+                state.block(id, draft, "builder").expect("block again");
+                store.reload_merge_save(&mut state).expect("save");
+                state.reply(id, "use postgres", "you").expect("reply");
+                store.reload_merge_save(&mut state).expect("save");
             }
             self.prompts.push((pane.into(), text.into()));
             self.prompt_error.clone().map_or(Ok(()), Err)
@@ -539,6 +587,279 @@ mod tests {
                 assert!(matches!(outcome, SendOutcome::NotDelivered { delivery, .. }
                     if delivery != Delivery::Sent));
             }
+        }
+    }
+
+    /// Add `replies` of yours (and one deleted) to task `number`'s open record, one save each.
+    fn saved_replies(temp: &Temp, number: u64, replies: &[&str]) {
+        let store = TaskStore::new(&temp.0);
+        let mut state = store.load().expect("load");
+        let id = state
+            .tasks()
+            .iter()
+            .find(|task| task.number == Some(number))
+            .expect("task")
+            .id;
+        for reply in replies {
+            state.reply(id, reply, "you").expect("reply");
+            store.reload_merge_save(&mut state).expect("save");
+        }
+        let dropped = state.reply(id, "scratch that", "you").expect("reply");
+        store.reload_merge_save(&mut state).expect("save");
+        state.delete_reply(id, dropped).expect("delete");
+        store.reload_merge_save(&mut state).expect("save");
+    }
+
+    fn start(temp: &Temp, number: u64, actor: &str, host: &mut Host) -> StartOutcome {
+        crate::cli::status::run_started_with_host(
+            TaskAddress::Number(number),
+            StartFlags::default(),
+            Some(temp.0.clone()),
+            true,
+            actor,
+            host,
+        )
+        .expect("start")
+    }
+
+    /// `tsk status N started` on a blocked task whose agent runs sends it every live reply of
+    /// the block, as the board's reply box `ctrl+s` does, and says so.
+    #[test]
+    fn a_cli_start_sends_every_reply_of_the_block() {
+        let temp = Temp::new("cli-unblock");
+        let number = temp.blocked(true);
+        saved_replies(&temp, number, &["use postgres", "add an index"]);
+        let mut host = running(&temp, number);
+        match start(&temp, number, "you", &mut host) {
+            StartOutcome::Delivered(_, line) => {
+                assert_eq!(line, "started · 2 replies sent to @builder")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            host.prompts,
+            [(
+                "w0:p1".to_string(),
+                format!("[tsk T{number} unblocked] 1. use postgres\n2. add an index")
+            )]
+        );
+        assert_eq!(temp.status(number), HumanStatus::Started);
+
+        // The block is closed: a repeat start sends nothing again.
+        let outcome = start(&temp, number, "you", &mut host);
+        assert!(matches!(outcome, StartOutcome::Status(_)), "{outcome:?}");
+        assert_eq!(host.prompts.len(), 1);
+    }
+
+    /// `tsk status N started` from review sends the round back with every feedback entry and
+    /// the failed checks. The agent starting its own task sends nothing.
+    #[test]
+    fn a_cli_send_back_delivers_the_rounds_feedback() {
+        for actor in ["you", "builder"] {
+            let temp = Temp::new("cli-send-back");
+            let number = temp.blocked(true);
+            let store = TaskStore::new(&temp.0);
+            let mut state = store.load().expect("load");
+            let id = state.tasks()[0].id;
+            state.set_status(id, HumanStatus::Started).expect("start");
+            store.reload_merge_save(&mut state).expect("save");
+            let draft = ReviewDraft::from_input(
+                Some("done"),
+                &["no flicker".to_string()],
+                None,
+                Default::default(),
+            )
+            .expect("draft");
+            state.review(id, draft, "builder").expect("review");
+            store.reload_merge_save(&mut state).expect("save");
+            state
+                .set_check(id, 0, crate::domain::CheckState::Failed)
+                .expect("fail");
+            store.reload_merge_save(&mut state).expect("save");
+            saved_replies(&temp, number, &["fix the peak", "and the dip"]);
+            let mut host = running(&temp, number);
+            let outcome = start(&temp, number, actor, &mut host);
+            if actor == "builder" {
+                assert!(matches!(outcome, StartOutcome::Status(_)), "{outcome:?}");
+                assert_eq!(host.prompts, []);
+                continue;
+            }
+            match outcome {
+                StartOutcome::Delivered(_, line) => {
+                    assert_eq!(line, "started · 2 feedback entries sent to @builder")
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                host.prompts,
+                [(
+                    "w0:p1".to_string(),
+                    format!(
+                        "[tsk T{number} sent back] 1. fix the peak\n2. and the dip\n\
+                         Failed checks: no flicker"
+                    )
+                )]
+            );
+        }
+    }
+
+    /// `tsk status N ready` on a blocked task sends the block's replies, as the board's
+    /// `ctrl+b` does; a block with none sends nothing.
+    #[test]
+    fn a_cli_unblock_to_ready_sends_the_blocks_replies() {
+        for replied in [true, false] {
+            let temp = Temp::new("cli-ready");
+            let number = temp.blocked(true);
+            if replied {
+                saved_replies(&temp, number, &["use postgres"]);
+            }
+            let mut host = running(&temp, number);
+            let (_, line) = crate::cli::status::run_ready_with_host(
+                TaskAddress::Number(number),
+                Some(temp.0.clone()),
+                true,
+                "you",
+                &mut host,
+            )
+            .expect("ready");
+            assert_eq!(temp.status(number), HumanStatus::Ready);
+            if replied {
+                assert_eq!(line.as_deref(), Some("ready · reply sent to @builder"));
+                assert_eq!(
+                    host.prompts,
+                    [(
+                        "w0:p1".to_string(),
+                        format!("[tsk T{number} unblocked] use postgres")
+                    )]
+                );
+            } else {
+                assert_eq!(line, None);
+                assert_eq!(host.prompts, []);
+            }
+        }
+    }
+
+    /// A reply `--send` delivered is marked sent: the start that unblocks delivers only the
+    /// replies that never went out. Feedback sent on a review is not sent back again either.
+    #[test]
+    fn a_sent_reply_is_not_delivered_again_when_the_record_closes() {
+        let temp = Temp::new("sent-then-unblock");
+        let number = temp.blocked(true);
+        let mut host = running(&temp, number);
+        assert_eq!(
+            send(&temp, number, "you", true, &mut host).line(),
+            "sent to @builder"
+        );
+        saved_replies(&temp, number, &["add an index"]);
+        match start(&temp, number, "you", &mut host) {
+            StartOutcome::Delivered(_, line) => {
+                assert_eq!(line, "started · reply sent to @builder")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            host.prompts,
+            [
+                (
+                    "w0:p1".to_string(),
+                    format!("[tsk T{number} reply] use postgres")
+                ),
+                (
+                    "w0:p1".to_string(),
+                    format!("[tsk T{number} unblocked] add an index")
+                ),
+            ]
+        );
+
+        let temp = Temp::new("sent-then-send-back");
+        let number = temp.blocked(true);
+        let store = TaskStore::new(&temp.0);
+        let mut state = store.load().expect("load");
+        let id = state.tasks()[0].id;
+        state.set_status(id, HumanStatus::Started).expect("start");
+        store.reload_merge_save(&mut state).expect("save");
+        let draft = ReviewDraft::from_input(
+            Some("done"),
+            &["no flicker".to_string()],
+            None,
+            Default::default(),
+        )
+        .expect("draft");
+        state.review(id, draft, "builder").expect("review");
+        store.reload_merge_save(&mut state).expect("save");
+        state
+            .set_check(id, 0, crate::domain::CheckState::Failed)
+            .expect("fail");
+        store.reload_merge_save(&mut state).expect("save");
+        let mut host = running(&temp, number);
+        send_text(&temp, number, "fix the peak", "you", true, &mut host);
+        start(&temp, number, "you", &mut host);
+        assert_eq!(
+            host.prompts,
+            [
+                (
+                    "w0:p1".to_string(),
+                    format!("[tsk T{number} reply] fix the peak")
+                ),
+                (
+                    "w0:p1".to_string(),
+                    format!("[tsk T{number} sent back] Failed checks: no flicker")
+                ),
+            ]
+        );
+    }
+
+    /// The record closes and a new one opens with the same reply at the same index while
+    /// `--send` is out: the mark stays with the record the reply was stored on, so the new
+    /// record's reply is unsent and its close delivers it.
+    #[test]
+    fn a_send_whose_record_closed_meanwhile_leaves_the_next_records_reply_unsent() {
+        let temp = Temp::new("send-reopened");
+        let number = temp.blocked(true);
+        let mut host = Host {
+            reopen_at_prompt: true,
+            ..running(&temp, number)
+        };
+        assert_eq!(
+            send(&temp, number, "you", true, &mut host).line(),
+            "sent to @builder"
+        );
+        let state = TaskStore::new(&temp.0).load().expect("load");
+        let task = &state.tasks()[0];
+        assert!(
+            !task.past_blocks[0].replies[0].sent,
+            "closed before the mark"
+        );
+        let block = task.block.as_ref().expect("the new record");
+        assert!(!block.replies[0].sent);
+        assert_eq!(block.owner_entries(), ["use postgres"]);
+    }
+
+    /// A `--send` that did not go out leaves the reply unsent: the record's close delivers it.
+    #[test]
+    fn a_reply_whose_send_failed_goes_out_when_the_record_closes() {
+        for error in [
+            PromptError::AgentBlocked,
+            PromptError::Failed("herdr".into()),
+        ] {
+            let temp = Temp::new("send-failed-then-unblock");
+            let number = temp.blocked(true);
+            let mut host = running(&temp, number);
+            host.prompt_error = Some(error.clone());
+            assert!(matches!(
+                send(&temp, number, "you", true, &mut host),
+                SendOutcome::NotDelivered { .. }
+            ));
+            host.prompt_error = None;
+            start(&temp, number, "you", &mut host);
+            assert_eq!(
+                host.prompts.last(),
+                Some(&(
+                    "w0:p1".to_string(),
+                    format!("[tsk T{number} unblocked] use postgres")
+                )),
+                "{error:?}"
+            );
         }
     }
 }
