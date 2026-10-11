@@ -22,11 +22,13 @@ const GH_VIEW_TIMEOUT: Duration = Duration::from_secs(20);
 const GH_MERGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Longest one row of a board `m` can take: the lookup, the merge, the lookup confirming it,
-/// and the remote-branch check. A quit waits this long per merging row, then for cleanup.
+/// and the remote-branch checks with their waits. A quit waits this long per merging row,
+/// then for cleanup.
 pub const MERGE_ROW_BOUND: Duration = Duration::from_secs(
     2 * GH_VIEW_TIMEOUT.as_secs()
         + GH_MERGE_TIMEOUT.as_secs()
-        + crate::git_base::NETWORK_TIMEOUT.as_secs(),
+        + (REMOTE_DELETE_WAITS.len() as u64 + 1) * crate::git_base::NETWORK_TIMEOUT.as_secs()
+        + 2,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,8 @@ pub enum PrLookupError {
     /// No `gh` on PATH (`gh.exe` on Windows).
     Missing,
     NotLoggedIn,
+    /// No git remote of the repository points at a GitHub host gh knows.
+    NoGithubRemote,
     Failed(String),
 }
 
@@ -72,6 +76,7 @@ impl PrLookupError {
         match self {
             Self::Missing => "gh not found on PATH".into(),
             Self::NotLoggedIn => "gh is not logged in (run gh auth login)".into(),
+            Self::NoGithubRemote => "no GitHub remote".into(),
             Self::Failed(reason) => format!("gh failed: {reason}"),
         }
     }
@@ -290,15 +295,43 @@ pub fn merge_row(
         Ok(None) => return Err(MergeError::NotMergedYet("no pull request".into())),
         Err(error) => return Err(MergeError::NotMergedYet(error.message())),
     };
-    let remote_branch_left = record.base_remote.as_deref().and_then(|remote| {
-        host.remote_branch_exists(project, remote, &record.branch)
-            .ok()
-    });
+    let remote_branch_left = record
+        .base_remote
+        .as_deref()
+        .and_then(|remote| remote_branch_after_merge(host, project, remote, &record.branch));
     Ok(MergeOutcome {
         pr,
         method,
         remote_branch_left,
     })
+}
+
+/// Waits between remote-branch checks after a merge: GitHub deletes a merged PR's branch
+/// (`delete_branch_on_merge`) a moment after the merge answers, so one early look reads it
+/// as kept.
+const REMOTE_DELETE_WAITS: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1250),
+];
+
+/// Whether the merged PR's branch is still on `remote`: asked again over a short grace while
+/// it still is, so a branch GitHub deletes on merge reads as deleted. `None`: unknown.
+fn remote_branch_after_merge(
+    host: &mut impl DispatchHost,
+    project: &Path,
+    remote: &str,
+    branch: &str,
+) -> Option<bool> {
+    let mut left = host.remote_branch_exists(project, remote, branch).ok()?;
+    for wait in REMOTE_DELETE_WAITS {
+        if !left {
+            break;
+        }
+        host.pause(wait);
+        left = host.remote_branch_exists(project, remote, branch).ok()?;
+    }
+    Some(left)
 }
 
 /// A cleanup card's PR lookup, with the branch tip it was compared against.
@@ -446,9 +479,18 @@ fn first_line(bytes: &[u8]) -> String {
         .to_string()
 }
 
-fn not_logged_in(code: Option<i32>, stderr: &str) -> bool {
+/// Why gh refused before reaching GitHub, when it was one of these.
+fn gh_refusal(code: Option<i32>, stderr: &str) -> Option<PrLookupError> {
+    // A repository whose remotes are not GitHub: gh's advice names `gh auth login` too, but
+    // being logged in would not help.
+    if stderr.contains("point to a known GitHub host") {
+        return Some(PrLookupError::NoGithubRemote);
+    }
     // gh exits 4 when authentication is required.
-    code == Some(4) || stderr.contains("gh auth login")
+    (code == Some(4)
+        || stderr.contains("To get started with GitHub CLI")
+        || stderr.contains("not logged into any GitHub hosts"))
+    .then_some(PrLookupError::NotLoggedIn)
 }
 
 /// Whether `program` can run: a path that exists, or a name on PATH (`gh.exe` on Windows).
@@ -499,8 +541,8 @@ pub fn pr_view_outcome(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> PrLoo
         if text.contains("no pull requests found") {
             return Ok(None);
         }
-        if not_logged_in(code, &text) {
-            return Err(PrLookupError::NotLoggedIn);
+        if let Some(error) = gh_refusal(code, &text) {
+            return Err(error);
         }
         return Err(PrLookupError::Failed(first_line(stderr)));
     }
@@ -564,8 +606,8 @@ pub(super) fn system_merge_pull_request(
         return Ok(());
     }
     let text = String::from_utf8_lossy(&output.stderr);
-    if not_logged_in(output.status.code(), &text) {
-        return Err(PrLookupError::NotLoggedIn.message());
+    if let Some(error) = gh_refusal(output.status.code(), &text) {
+        return Err(error.message());
     }
     Err(first_line(&output.stderr))
 }
@@ -644,6 +686,16 @@ mod tests {
             ),
             Err(PrLookupError::NotLoggedIn)
         );
+        // gh's advice names `gh auth login`, but the repository has no GitHub remote.
+        assert_eq!(
+            pr_view_outcome(
+                Some(1),
+                b"",
+                b"none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use gh auth login\n"
+            ),
+            Err(PrLookupError::NoGithubRemote)
+        );
+        assert_eq!(PrLookupError::NoGithubRemote.message(), "no GitHub remote");
         assert_eq!(
             pr_view_outcome(Some(1), b"", b"\nGraphQL: something broke\nmore\n"),
             Err(PrLookupError::Failed("GraphQL: something broke".into()))
