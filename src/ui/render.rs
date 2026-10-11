@@ -123,10 +123,13 @@ pub struct TaskRowLine {
 
 /// Paint one task as ONE OR MORE list lines. Persisted tasks lead with a dim,
 /// presentation-only identifier; wrapped title continuations align under the title text.
+/// A row with a live line or an open peek under it (`live_gutter`) carries a dim `│` on each
+/// continuation in the `└` column, inside the indent, so the title wraps as before.
 pub fn paint_task_row_lines(
     row: &TaskRowPaint<'_>,
     geo: &TierGeometry,
     leading_indent: usize,
+    live_gutter: bool,
 ) -> Vec<TaskRowLine> {
     let row_w = geo.row_width.saturating_sub(2) as usize;
     let title_budget = row_w;
@@ -174,15 +177,24 @@ pub fn paint_task_row_lines(
     } else {
         style_plain()
     };
+    // The gutter takes indent cells only: the title column never moves.
+    let gutter_cells = LIVE_GUTTER_INDENT.len() + 1;
+    let gutter =
+        (live_gutter && title_x > gutter_cells).then(|| " ".repeat(title_x - gutter_cells));
     for segment in segments.iter().skip(1) {
+        let line = match &gutter {
+            Some(pad) => Line::from(vec![
+                Span::styled(LIVE_GUTTER_INDENT, style_plain()),
+                Span::styled("│", style_dim()),
+                Span::styled(format!("{pad}{segment}"), continuation_style),
+            ]),
+            None => Line::from(Span::styled(
+                format!("{indent}{segment}"),
+                continuation_style,
+            )),
+        };
         lines.push(TaskRowLine {
-            line: bound_line(
-                Line::from(Span::styled(
-                    format!("{indent}{segment}"),
-                    continuation_style,
-                )),
-                row_w,
-            ),
+            line: bound_line(line, row_w),
             content_x: title_content_x,
             content_width: title_content_width,
             identifier: None,
@@ -190,6 +202,10 @@ pub fn paint_task_row_lines(
     }
     lines
 }
+
+/// The cells before the live line's `└` (`    └─ `): wrapped title lines above a live line
+/// carry their `│` gutter right after them.
+const LIVE_GUTTER_INDENT: &str = "    ";
 
 /// The dim line under a board row that says in plain words what is going on: who a block or
 /// review waits on and for how long, or what an on-deck task still runs after. `None` for a
@@ -343,7 +359,7 @@ pub fn before_numbers(task: &Task, tasks: &[Task]) -> Vec<u64> {
 // Unit-test adapter: inspect the same first wrapped line the board paints.
 #[cfg(test)]
 fn paint_task_row(row: &TaskRowPaint<'_>, geo: &TierGeometry) -> Line<'static> {
-    paint_task_row_lines(row, geo, 0).remove(0).line
+    paint_task_row_lines(row, geo, 0, false).remove(0).line
 }
 
 /// Paint a task row with extra leading cells reserved for a containing visual group.
@@ -5071,14 +5087,12 @@ fn detail_lines_for_task(
         .max(1);
     let block_lines = peek_block_lines(task, tasks, now);
     let has_block = !block_lines.is_empty();
-    let links = after_peek_lines(task, tasks)
-        .into_iter()
-        .map(|text| (text, style_dim()));
-    for (text, style) in block_lines.into_iter().chain(links) {
+    // Peek text is dim, whatever it says: the row above stays the one thing at full weight.
+    for text in block_lines.into_iter().chain(after_peek_lines(task, tasks)) {
         for row in crate::ui::edit::wrap_text(&text, room) {
             push(
                 &mut lines,
-                paint_bounded_line(&format!("{indent}{}", row.text), width, style),
+                paint_bounded_line(&format!("{indent}{}", row.text), width, style_dim()),
             );
         }
     }
@@ -5204,7 +5218,7 @@ fn row_reply_rows(
 /// The peek's block or review lines, one per item before wrapping: the live line, then why
 /// and `Decide:` the options (or the needs) for a block, the done text and every check on one
 /// line for a review. Empty unless the task is blocked or in review with a recorded block.
-fn peek_block_lines(task: &Task, tasks: &[Task], now: SystemTime) -> Vec<(String, Style)> {
+fn peek_block_lines(task: &Task, tasks: &[Task], now: SystemTime) -> Vec<String> {
     let mut lines = Vec::new();
     // A notice peeks its notes, whatever its status: it has no live line to lead with.
     if !matches!(task.status, HumanStatus::Blocked | HumanStatus::Review) || task.is_notice() {
@@ -5222,11 +5236,11 @@ fn peek_block_lines(task: &Task, tasks: &[Task], now: SystemTime) -> Vec<(String
         return lines;
     };
     if let Some(live) = live_line(task, tasks, now) {
-        lines.push((super::terminal_text(&live), style_plain()));
+        lines.push(super::terminal_text(&live));
     }
     if review {
         if let Some(done) = block.done.as_deref() {
-            lines.push((one_line(done), style_plain()));
+            lines.push(one_line(done));
         }
         if !block.checks.is_empty() {
             let checks = block
@@ -5235,12 +5249,12 @@ fn peek_block_lines(task: &Task, tasks: &[Task], now: SystemTime) -> Vec<(String
                 .map(|check| format!("{} {}", check_glyph(check.state), one_line(&check.text)))
                 .collect::<Vec<_>>()
                 .join("   ");
-            lines.push((checks, style_plain()));
+            lines.push(checks);
         }
         return lines;
     }
     if let Some(why) = block.why.as_deref() {
-        lines.push((one_line(why), style_plain()));
+        lines.push(one_line(why));
     }
     if !block.options.is_empty() {
         let options = block
@@ -5249,9 +5263,9 @@ fn peek_block_lines(task: &Task, tasks: &[Task], now: SystemTime) -> Vec<(String
             .map(|option| one_line(option))
             .collect::<Vec<_>>()
             .join(" · ");
-        lines.push((format!("Decide: {options}"), style_plain()));
+        lines.push(format!("Decide: {options}"));
     } else if let Some(needs) = block.needs.as_deref() {
-        lines.push((one_line(needs), style_plain()));
+        lines.push(one_line(needs));
     }
     lines
 }
@@ -5345,6 +5359,11 @@ fn build_list_rows_inner(
         // A long title wraps onto continuation lines indented under its own first
         // row; every painted line carries the task's hit target and selection.
         let identifier = task.board_identifier();
+        // The live line belongs to its row: every wrapped line is a task line, so a click on
+        // it acts on the task and selection follow keeps it in view. The peek replaces it.
+        let live_text = (!rail && detail_target != Some(task.id))
+            .then(|| live_line(task, model.tasks, model.now))
+            .flatten();
         let lines = if rail {
             paint_rail_row_lines(
                 task,
@@ -5368,13 +5387,12 @@ fn build_list_rows_inner(
                 },
                 geo,
                 0,
+                // Whatever hangs under the row at the `└` column, its live line or its open
+                // peek, joins the wrapped title through the gutter.
+                live_text.is_some() || detail_target == Some(task.id),
             )
         };
-        // The live line belongs to its row: every wrapped line is a task line, so a click on
-        // it acts on the task and selection follow keeps it in view. The peek replaces it.
-        let live = (!rail && detail_target != Some(task.id))
-            .then(|| live_line(task, model.tasks, model.now))
-            .flatten()
+        let live = live_text
             .map(|text| live_line_rows(&super::terminal_text(&text), geo.row_width))
             .unwrap_or_default();
         if selected {
@@ -6914,6 +6932,33 @@ mod tests {
     }
 
     #[test]
+    fn the_live_gutter_is_dim_and_the_title_beside_it_is_not() {
+        let geo = tier::resolve(40, 24);
+        let row = TaskRowPaint {
+            glyph: "■",
+            identifier: Some("T12"),
+            title: "A title long enough to wrap onto continuation lines at forty columns",
+            selected: false,
+            marked: false,
+            title_bold: false,
+            dim: false,
+        };
+        let lines = paint_task_row_lines(&row, &geo, 0, true);
+        assert!(lines.len() > 1);
+        for line in &lines[1..] {
+            let line = &line.line;
+            assert!(plain(line).starts_with("    │   "), "{:?}", plain(line));
+            let gutter = line.spans.iter().find(|span| span.content == "│").unwrap();
+            assert!(gutter.style.add_modifier.contains(Modifier::DIM));
+            let title = line.spans.last().unwrap();
+            assert!(
+                !title.style.add_modifier.contains(Modifier::DIM),
+                "{title:?}"
+            );
+        }
+    }
+
+    #[test]
     fn task_titles_use_full_width_with_two_cells_at_right_edge() {
         let geo = tier::resolve(80, 24);
         let room = geo.row_width as usize - 8 - 2;
@@ -6928,7 +6973,7 @@ mod tests {
                 title_bold: false,
                 dim: false,
             };
-            let lines = paint_task_row_lines(&row, &geo, 0);
+            let lines = paint_task_row_lines(&row, &geo, 0, false);
             assert_eq!(lines.len(), 2);
             assert_eq!(plain(&lines[0].line).matches('X').count(), room);
             assert!(!plain(&lines[0].line).contains("public-launch"));
@@ -6960,7 +7005,7 @@ mod tests {
                         title_bold: selected,
                         dim: false,
                     };
-                    for line in paint_task_row_lines(&row, &geo, 0) {
+                    for line in paint_task_row_lines(&row, &geo, 0, false) {
                         assert!(
                             line.line.width() <= geo.row_width as usize,
                             "{width}x{height} overflow"

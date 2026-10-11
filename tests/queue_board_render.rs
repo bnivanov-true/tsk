@@ -7040,6 +7040,139 @@ fn live_lines_sit_under_their_rows_and_the_right_edge_stays_empty() {
 }
 
 #[test]
+fn wrapped_titles_above_a_live_line_carry_a_gutter_in_its_column() {
+    let long = "Make every word of this deliberately long title wrap onto continuation lines at \
+                each width tier the board paints so the gutter shows on all of them END";
+    let mut tasks = live_line_tasks();
+    for task in &mut tasks {
+        // T13 is a review on pi (a live line); T9 waits on nothing left (none).
+        if matches!(task.number, Some(13) | Some(9)) {
+            task.title = format!("{} {long}", task.number.unwrap());
+        }
+    }
+    let view = fixture_view_projects(&tasks, false);
+    let mut model = fixture_model_on_tab(&tasks, &view, NavTab::ProjectBoard);
+    model.selection_id = Some(Uuid::from_u128(2));
+    // The row's own lines: its first line, then every continuation down to the next row.
+    let block = |body: &[String], number: u64| -> Vec<String> {
+        let head = format!("T{number} {number} Make");
+        let at = body
+            .iter()
+            .position(|row| row.contains(&head))
+            .unwrap_or_else(|| panic!("{head} missing:\n{}", body.join("\n")));
+        let mut lines = vec![body[at].clone()];
+        lines.extend(
+            body[at + 1..]
+                .iter()
+                .take_while(|row| row.starts_with("    ") && !row.starts_with("    └─ "))
+                .cloned(),
+        );
+        lines
+    };
+    for width in [40u16, 78, 109, 120, 160] {
+        let (rows, _) = paint(width, 80, &model);
+        let body = rows.iter().map(|row| list_body(row)).collect::<Vec<_>>();
+        for (number, live) in [(13, true), (9, false)] {
+            let lines = block(&body, number);
+            assert!(
+                lines.len() > 1,
+                "{width}: T{number} wraps:\n{}",
+                body.join("\n")
+            );
+            let title_x = lines[0].find(&format!("{number} Make")).unwrap();
+            let title_x = lines[0][..title_x].chars().count();
+            for line in &lines[1..] {
+                let cells: Vec<char> = line.chars().collect();
+                // The title keeps its wrap column; only the indent changes.
+                assert!(
+                    cells[..title_x]
+                        .iter()
+                        .enumerate()
+                        .all(|(x, c)| { *c == if live && x == 4 { '│' } else { ' ' } })
+                        && cells[title_x] != ' ',
+                    "{width}: T{number} continuation {line:?}"
+                );
+            }
+            let next = body
+                .iter()
+                .position(|row| row == lines.last().unwrap())
+                .map(|at| body[at + 1].as_str());
+            if live {
+                assert_eq!(next, Some("    └─ @pi reviewing"), "{width}");
+            }
+        }
+        let text = body.join("\n");
+        assert!(
+            text.contains("END\n    └─ @pi reviewing"),
+            "{width}:\n{text}"
+        );
+    }
+
+    // An open peek replaces the live line and keeps the gutter, so the title runs into the
+    // peek's own `│` with no gap; a row with no live line gains it while its peek is open.
+    for (number, first_peek) in [(13, "    │ @pi reviewing"), (9, "    │ ")] {
+        model.selection_id = Some(Uuid::from_u128(number.into()));
+        model.detail_open = Some(Uuid::from_u128(number.into()));
+        let (rows, _) = paint(40, 80, &model);
+        let body = rows.iter().map(|row| list_body(row)).collect::<Vec<_>>();
+        let lines = block(&body, number);
+        assert!(
+            lines[1..6].iter().all(|line| line.starts_with("    │  ")),
+            "T{number}: {lines:?}"
+        );
+        assert!(lines[6].starts_with(first_peek), "T{number}: {lines:?}");
+    }
+}
+
+#[test]
+fn blocked_and_review_peek_text_stays_dim() {
+    let tasks = live_line_tasks();
+    let view = fixture_view_projects(&tasks, false);
+    // T1 a block with options, T3 a review with checks, T8 an after link.
+    for id in [1u128, 3, 8] {
+        let mut model = fixture_model_on_tab(&tasks, &view, NavTab::ProjectBoard);
+        model.selection_id = Some(Uuid::from_u128(id));
+        model.detail_open = Some(Uuid::from_u128(id));
+        let (width, height) = (78u16, 60u16);
+        let geo = tier::resolve(width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame: &mut Frame| {
+                let _ = draw_queue_frame(frame, &model, &geo, Rect::new(0, 0, width, height));
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let row = |y: u16| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let top = (0..height)
+            .find(|y| row(*y).starts_with('▸'))
+            .expect("selected row");
+        let mut checked = 0;
+        for y in top + 1..height {
+            if !row(y).starts_with("    │ ") {
+                break;
+            }
+            for x in 6..width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() != " " {
+                    assert!(
+                        cell.style().add_modifier.contains(Modifier::DIM),
+                        "T{id}: {:?} at {x} is not dim in {:?}",
+                        cell.symbol(),
+                        row(y)
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "T{id}: no peek text");
+    }
+}
+
+#[test]
 fn blocked_and_review_peeks_lead_with_the_live_line_and_drop_notes() {
     let tasks = live_line_tasks();
     let view = fixture_view_projects(&tasks, false);
