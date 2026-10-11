@@ -13,7 +13,7 @@ Steps are a flat, ordered checklist. Checking every step does not complete the t
 
 `Enter` saves the step and opens another empty row. `Shift+Enter` saves it and finishes any active task edit. Click elsewhere to discard an empty new-step row.
 
-New steps save independently, including during task editing. Cancelling the task edit does not undo steps already added.
+New steps save independently, including during task editing. Cancelling the task edit does not undo steps already added. Each tick, untick, new step, removal, or new step text is one `ctrl+u` [undo](/docs/board/#delete-and-undo) step; undoing new text from a task-page save leaves that save's title and notes.
 
 ## Complete
 
@@ -34,6 +34,8 @@ The heading shows completed/total steps. In view mode, status shortcuts change t
 3. Press `Shift+Enter` to save the task edit.
 
 `Enter` retains the rename in the edit session without saving that session. Moving to another existing step retains the previous draft. `Esc` cancels the field; cancelling task editing restores staged changes.
+
+A step cannot be saved empty. If you clear a step's text, saving the task edit reopens that step with `text required` on its row and saves nothing until you type text, remove the step, or cancel. If a new step you typed is still open, that row keeps the editor so its text is not lost, and the status row says `a cleared step needs text` instead.
 
 ## Remove
 

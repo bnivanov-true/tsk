@@ -3634,7 +3634,8 @@ impl ClosingSummary {
 }
 
 /// Start `ids` as a plain status change in one save and one undo step: the relaunch card's
-/// `n`, and the start-only rows of the bulk card. Each row is rechecked against the refreshed
+/// `n`, a start that cannot launch here, and the start-only rows of the bulk card (`bulk_card`
+/// records them as start entries beside the card's launches, the rest as status changes). Each row is rechecked against the refreshed
 /// board with the rule the card was opened under: a row that no longer moves (started, done,
 /// archived, deleted, or out of `ctrl+s`'s open/ready) is left alone, and a row that now
 /// needs a launch the card did not show (assigned meanwhile) is refused on the status row.
@@ -3651,7 +3652,7 @@ fn start_plain_and_save(
     ids: &[uuid::Uuid],
     corrections: &[uuid::Uuid],
     any_status: bool,
-    undoable: bool,
+    bulk_card: bool,
     in_herdr: bool,
     host: &mut impl DispatchHost,
 ) -> Option<PlainStart> {
@@ -3692,13 +3693,10 @@ fn start_plain_and_save(
         });
     }
     let closing = closing_candidates(domain, moving.iter().copied());
-    let started = if undoable {
+    let started = if bulk_card {
         domain.start_batch(&moving)
     } else {
-        moving
-            .iter()
-            .try_for_each(|id| domain.set_status(*id, HumanStatus::Started))
-            .map(|()| true)
+        domain.change_status(&moving, HumanStatus::Started, moving.len() > 1)
     };
     if let Err(error) = started {
         model.set_message(board_rejection_message(&error));
@@ -14061,6 +14059,111 @@ mod quick_assign_tests {
         assert_eq!(host.ran, 0);
     }
 
+    /// The reply box's unblock is a status change like any other: one `ctrl+u` puts the task
+    /// back to blocked with its block, reply and all (#173 finding 4).
+    #[test]
+    fn undo_after_reply_and_unblock_reopens_the_block_with_its_reply() {
+        let temp = Temp::new("reply-undo", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["mine"]);
+        reply_on_blocked(&temp, &mut domain, &mut model, ids[0], "postgres");
+        let mut host = fake_host(&temp);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ReplySaveUnblock,
+            &mut host,
+        );
+        assert_eq!(
+            temp.store
+                .load()
+                .expect("reload")
+                .get(ids[0])
+                .expect("task")
+                .status,
+            HumanStatus::Ready
+        );
+        handle(&temp, &mut domain, &mut model, BoardIntent::Undo, &mut host);
+        let saved = temp.store.load().expect("reload");
+        let task = saved.get(ids[0]).expect("task");
+        assert_eq!(task.status, HumanStatus::Blocked);
+        assert!(task.block.is_some(), "the block is open again");
+        assert_eq!(last_reply(&saved, ids[0]).as_deref(), Some("postgres"));
+    }
+
+    /// An undo that never takes a task out of started claims no running agent, even with a
+    /// dispatch record still uncleaned (review K2): done or ready from review, then undo.
+    #[test]
+    fn undo_from_review_back_to_review_claims_no_running_agent() {
+        let temp = Temp::new("undo-review-no-agent", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["reviewed"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Review);
+        let mut host = fake_host(&temp);
+        let number = domain
+            .get(ids[0])
+            .and_then(|task| task.number)
+            .expect("number");
+
+        domain.complete(ids[0]).expect("done without cleanup");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        handle(&temp, &mut domain, &mut model, BoardIntent::Undo, &mut host);
+        assert_eq!(
+            model.message(),
+            Some(format!("done undone · T{number} back to review").as_str())
+        );
+
+        domain
+            .change_status(&[ids[0]], HumanStatus::Ready, false)
+            .expect("ready");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        handle(&temp, &mut domain, &mut model, BoardIntent::Undo, &mut host);
+        assert_eq!(
+            model.message(),
+            Some(format!("status undone · T{number} back to review").as_str())
+        );
+    }
+
+    /// A reply-box unblock with the agent still running is a plain start: undo restores
+    /// blocked and launches nothing.
+    #[test]
+    fn undo_after_reply_and_unblock_with_a_running_agent_goes_back_to_blocked() {
+        let temp = Temp::new("reply-running-undo", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["agent waits"]);
+        dispatched_before(&temp, &mut domain, &mut model, ids[0], HumanStatus::Started);
+        reply_on_blocked(&temp, &mut domain, &mut model, ids[0], "postgres");
+        let mut host = fake_host(&temp);
+        agent_running(&domain, &mut host, ids[0]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ReplySaveUnblock,
+            &mut host,
+        );
+        assert_eq!(
+            temp.store
+                .load()
+                .expect("reload")
+                .get(ids[0])
+                .expect("task")
+                .status,
+            HumanStatus::Started
+        );
+        handle(&temp, &mut domain, &mut model, BoardIntent::Undo, &mut host);
+        let saved = temp.store.load().expect("reload");
+        assert_eq!(
+            saved.get(ids[0]).expect("task").status,
+            HumanStatus::Blocked
+        );
+        assert_eq!(host.ran, 0, "undo launches nothing");
+        assert_eq!(
+            model.message(),
+            Some("status undone · T1 back to blocked · @builder kept running")
+        );
+    }
+
     #[test]
     fn reply_and_unblock_on_an_assigned_task_saves_the_reply_then_dispatches() {
         let temp = Temp::new("reply-dispatch", &["builder"]);
@@ -15556,7 +15659,7 @@ mod quick_assign_tests {
         );
         assert_eq!(
             model.message(),
-            Some("start undone · @builder kept running")
+            Some("start undone · T1 back to ready · @builder kept running")
         );
     }
 
@@ -17873,7 +17976,7 @@ mod quick_assign_tests {
         assert_eq!(status_of(&disk, ids[1]), HumanStatus::Ready);
         assert_eq!(
             model.message(),
-            Some(format!("done undone · T{second} back to ready").as_str())
+            Some(format!("done undone · T{first} back to open · T{second} back to ready").as_str())
         );
     }
 
@@ -17921,7 +18024,12 @@ mod quick_assign_tests {
         assert!(disk.get(ids[1]).expect("task").dispatch.is_some());
         assert_eq!(
             model.message(),
-            Some(format!("done undone · T{second} back to ready · @builder kept running").as_str())
+            Some(
+                format!(
+                    "done undone · T{first} back to open · T{second} back to ready · @builder kept running"
+                )
+                .as_str()
+            )
         );
     }
 
@@ -20383,8 +20491,8 @@ mod bulk_cleanup_tests {
         press(&mut board, BoardIntent::Undo, &mut host);
         assert_eq!(
             statuses(&board),
-            [HumanStatus::Open, HumanStatus::Started, HumanStatus::Open],
-            "one undo reopens every task it completed"
+            [HumanStatus::Started; 3],
+            "one undo puts every task it completed back to started"
         );
         assert!(
             cleaned(&board, 0),
@@ -20744,11 +20852,12 @@ mod bulk_cleanup_tests {
         assert!(cleaned(&board, 1));
         assert_eq!(board.model.message(), Some("done 3 · cleaned 2"));
         assert_eq!(host.removed.len(), 2);
-        // Cleaned markers landed after completion, and one undo still reopens the set.
+        // Cleaned markers landed after completion, and one undo still puts the set back to
+        // the status each left.
         press(&mut board, BoardIntent::Undo, &mut host);
         assert!(statuses(&board)
             .iter()
-            .all(|status| *status == HumanStatus::Open));
+            .all(|status| *status == HumanStatus::Started));
         assert!(cleaned(&board, 0) && cleaned(&board, 1));
     }
 
