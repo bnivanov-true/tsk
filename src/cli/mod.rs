@@ -188,10 +188,107 @@ fn run_clean(args: Vec<String>) -> CliOutput {
         return presenter::clean_usage("task number is required");
     };
     share_fetch_window(&input.state_dir);
+    if input.merge {
+        let (state_dir, mut host) = dispatch::system_host(input.state_dir);
+        let in_herdr = crate::dispatch::running_inside_herdr();
+        return merge_done_clean_with_host(
+            task, state_dir, "clean", input.json, in_herdr, &mut host,
+        );
+    }
     match clean::run(task, input.state_dir) {
         Ok(result) => presenter::cleaned(result, input.json),
         Err(error) => presenter::clean_rejected(error, task),
     }
+}
+
+/// Both `--merge` forms: merge the task's pull request first, and only once GitHub shows it
+/// merged set the task done, then clean its dispatch. A refusal before the merge changes
+/// nothing. After it, a done-save failure (exit 3) or a cleanup refusal (exit 1) still
+/// reports what merged, in `--json` too: the PR is merged whatever follows.
+pub fn merge_done_clean_with_host(
+    task: parser::TaskAddress,
+    state_dir: std::path::PathBuf,
+    verb: &str,
+    json: bool,
+    in_herdr: bool,
+    host: &mut impl crate::dispatch::DispatchHost,
+) -> CliOutput {
+    let merged = match clean::merge_with_host(task, Some(state_dir.clone()), in_herdr, host) {
+        Ok(merged) => merged,
+        Err(refused) => return presenter::merge_rejected(verb, &refused),
+    };
+    let mut output = CliOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        code: 0,
+    };
+    if !json {
+        output.stdout.push_str(&presenter::merged(&merged));
+    }
+    let done = status::run_done_with_host(
+        task,
+        Some(state_dir.clone()),
+        in_herdr,
+        &crate::domain::actor_from_env(),
+        host,
+    );
+    let (result, released) = match done {
+        Ok(done) => done,
+        Err(error) => {
+            let code = error.code();
+            let refused = presenter::status_rejected(error, task);
+            let refused_stderr = refused
+                .stderr
+                .replacen("tsk status:", &format!("tsk {verb}:"), 1);
+            if json {
+                output.stdout =
+                    presenter::merge_partial_json(&merged, false, "done", code, &refused_stderr);
+            }
+            output.stderr.push_str(&refused_stderr);
+            output.code = refused.code;
+            return output;
+        }
+    };
+    status::name_released(&released);
+    let lines = if json {
+        &mut output.stderr
+    } else {
+        &mut output.stdout
+    };
+    if !json {
+        lines.push_str(&presenter::status(result).stdout);
+    }
+    if let Some(line) = crate::dispatch::released_message(&released) {
+        lines.push_str(&crate::ui::terminal_text(&line));
+        lines.push('\n');
+    }
+    // The done and the start are durable: a lost record or rollback is a warning.
+    for warning in crate::dispatch::released_warnings(&released) {
+        output.stderr.push_str(&crate::ui::terminal_text(&format!(
+            "tsk {verb}: warning: {warning}"
+        )));
+        output.stderr.push('\n');
+    }
+    share_fetch_window(&Some(state_dir.clone()));
+    match clean::run_with_host(task, Some(state_dir), in_herdr, host) {
+        Ok(result) => output
+            .stdout
+            .push_str(&presenter::cleaned_merged(result, Some(&merged), json).stdout),
+        Err(error) => {
+            let code = error.code();
+            let refused = presenter::clean_rejected(error, task);
+            let refused_stderr = refused
+                .stderr
+                .replacen("tsk clean:", &format!("tsk {verb}:"), 1);
+            if json {
+                output.stdout =
+                    presenter::merge_partial_json(&merged, true, "cleanup", code, &refused_stderr);
+            }
+            output.stderr.push_str(&refused_stderr);
+            output.code = refused.code;
+        }
+    }
+    output
 }
 
 fn run_status(args: Vec<String>) -> CliOutput {
@@ -229,6 +326,12 @@ fn run_status(args: Vec<String>) -> CliOutput {
             }
             Err(error) => presenter::status_rejected(error, task),
         };
+    }
+    if input.merge {
+        share_fetch_window(&input.state_dir);
+        let (state_dir, mut host) = dispatch::system_host(input.state_dir);
+        let in_herdr = crate::dispatch::running_inside_herdr();
+        return merge_done_clean_with_host(task, state_dir, "status", false, in_herdr, &mut host);
     }
     let state_dir = input.state_dir.clone();
     let outcome = if status == crate::domain::HumanStatus::Done {
