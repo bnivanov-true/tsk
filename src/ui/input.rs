@@ -153,8 +153,11 @@ pub enum BoardIntent {
     BeginEditNotes,
     /// Open the same bound task form as `e`, focused on Scope (palette Change scope).
     BeginEditScope,
-    /// Open the steps section's one-line editor empty to add an step (page `a`).
+    /// Open the steps section's one-line editor empty to add an step (page `a`). With a
+    /// stored step selected the row opens directly below it.
     BeginAddStep,
+    /// A click on the trailing `+ step` row: open the add row at the end of the list.
+    BeginAppendStep,
     /// Move focus through the shared capture/task form fields.
     FormFocusNext,
     FormFocusPrev,
@@ -319,6 +322,10 @@ pub enum BoardIntent {
     CloseHelp,
     /// `Enter` on a stored task-page step: flip it between done and ready.
     ToggleStep,
+    /// `alt+↑` on a selected task-page step: move it one place up (palette `move step up`).
+    MoveStepUp,
+    /// `alt+↓` on a selected task-page step: move it one place down.
+    MoveStepDown,
     /// `Enter` opens the selected task as a full-page view in single-pane presentation.
     OpenTaskPage,
     /// `→` at wide widths: move the stage slider one step towards the task (0 → A → G → F).
@@ -851,8 +858,14 @@ fn help_bindings() -> Vec<HelpBinding> {
         help_binding(
             HelpGroup::CreateEdit,
             "ctrl+a",
-            "add step (task page)",
-            "create checklist",
+            "add step below selected (task page)",
+            "create insert checklist",
+        ),
+        help_binding(
+            HelpGroup::TaskActions,
+            "alt+↑ / alt+↓",
+            "move selected step (task page)",
+            "reorder checklist up down",
         ),
         help_binding(
             HelpGroup::Navigation,
@@ -1694,6 +1707,7 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::BeginEditNotes
         | BoardIntent::BeginEditScope
         | BoardIntent::BeginAddStep
+        | BoardIntent::BeginAppendStep
         | BoardIntent::Quit
         | BoardIntent::EditInsert(_)
         | BoardIntent::EditInsertText(_)
@@ -1785,6 +1799,8 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::HelpScrollDown
         | BoardIntent::CloseHelp
         | BoardIntent::ToggleStep
+        | BoardIntent::MoveStepUp
+        | BoardIntent::MoveStepDown
         | BoardIntent::OpenTaskPage
         | BoardIntent::StageRight
         | BoardIntent::StageLeft
@@ -1897,6 +1913,17 @@ fn map_task_page(key: KeyEvent) -> Option<BoardIntent> {
     let extra = mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
     match key.code {
         KeyCode::Esc if !extra => Some(BoardIntent::CloseLayer),
+        // The one mutating chord without Ctrl: macOS reserves ctrl+arrows for Mission Control.
+        KeyCode::Up | KeyCode::Down
+            if mods.contains(KeyModifiers::ALT)
+                && !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+        {
+            Some(if key.code == KeyCode::Up {
+                BoardIntent::MoveStepUp
+            } else {
+                BoardIntent::MoveStepDown
+            })
+        }
         KeyCode::Char('q') if verb => Some(BoardIntent::Quit),
         KeyCode::Enter if !extra => Some(BoardIntent::OpenTaskPage),
         KeyCode::Char('s') if verb => Some(BoardIntent::PrimaryVerb),
@@ -1911,6 +1938,7 @@ fn map_task_page(key: KeyEvent) -> Option<BoardIntent> {
         KeyCode::Char('f') if verb => Some(BoardIntent::File),
         KeyCode::Char('e') if verb => Some(BoardIntent::BeginEditTitle),
         KeyCode::Char('?') if !extra => Some(BoardIntent::OpenHelp),
+        KeyCode::Char(':') if !extra => Some(BoardIntent::OpenCommandPalette),
         KeyCode::Tab if !extra => Some(BoardIntent::FormFocusNext),
         KeyCode::BackTab
             if !mods

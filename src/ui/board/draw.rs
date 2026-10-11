@@ -301,6 +301,7 @@ fn build_task_page_overlay<'a>(
     // reserved width is the scrollbar-safe content width less the step glyph and trailing
     // pad, matching Notes' no-truncation behavior.
     let step_text_width = width.saturating_sub(8);
+    form.steps.text_width.set(step_text_width);
     // Task-edit removals are staged, not durable, but they immediately leave the rendered
     // list. Keep the task's source index only in the session state, then derive this compact
     // visible list so the renderer never receives a row it must hide conditionally.
@@ -311,6 +312,7 @@ fn build_task_page_overlay<'a>(
                 .filter(|step| !form.steps.removals.contains(&step.id))
                 .map(|step| render::StepView {
                     done: step.done,
+                    inserted: false,
                     rows: crate::ui::edit::wrap_text(&step.text, step_text_width)
                         .into_iter()
                         .map(|row| row.text)
@@ -322,6 +324,7 @@ fn build_task_page_overlay<'a>(
     for text in &form.steps.pending_adds {
         step_views.push(render::StepView {
             done: false,
+            inserted: false,
             rows: crate::ui::edit::wrap_text(text, step_text_width)
                 .into_iter()
                 .map(|row| row.text)
@@ -352,13 +355,31 @@ fn build_task_page_overlay<'a>(
                 .iter()
                 .filter(|step| !form.steps.removals.contains(&step.id))
                 .position(|step| step.id == step_id)?,
-            None => step_views.len(),
+            // A positioned add row paints directly below its anchor; otherwise it trails.
+            None => editor
+                .insert_after
+                .and_then(|anchor| {
+                    bound_task?
+                        .steps
+                        .iter()
+                        .filter(|step| !form.steps.removals.contains(&step.id))
+                        .position(|step| step.id == anchor)
+                })
+                .map_or(step_views.len(), |anchor| anchor + 1),
         };
         let (rows, cursor_row, cursor_col) = wrapped_edit_rows(&editor.buffer, step_text_width);
-        if index < step_views.len() {
+        if editor.rename.is_some() {
             step_views[index].rows = rows;
         } else {
-            step_views.push(render::StepView { done: false, rows });
+            let inserted = index < step_views.len();
+            step_views.insert(
+                index,
+                render::StepView {
+                    done: false,
+                    rows,
+                    inserted,
+                },
+            );
         }
         (model.input_mode() == BoardInputMode::EditStep).then_some(render::InlineStepEditor {
             index,
@@ -387,6 +408,7 @@ fn build_task_page_overlay<'a>(
     // Staged removals occupy zero rows; the active add row is not addressable by this cursor.
     let mut visible_counts = step_views
         .iter()
+        .filter(|step| !step.inserted)
         .take(stored_step_count)
         .map(|step| step.rows.len().max(1));
     form.steps.row_counts.replace(
