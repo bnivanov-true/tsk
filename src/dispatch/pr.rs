@@ -479,6 +479,27 @@ fn first_line(bytes: &[u8]) -> String {
         .to_string()
 }
 
+/// gh's whole stderr message without the failure glyph it leads with (`X `, `✗ `, `✘ `): every
+/// non-empty line, trimmed and joined with a space so it stays one line that the card and the
+/// status row wrap. Nothing else is reworded.
+pub fn gh_message(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return "no output".to_string();
+    };
+    let first = ["X ", "✗ ", "✘ "]
+        .iter()
+        .find_map(|glyph| first.strip_prefix(glyph))
+        .map(str::trim_start)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(first);
+    std::iter::once(first)
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Why gh refused before reaching GitHub, when it was one of these.
 fn gh_refusal(code: Option<i32>, stderr: &str) -> Option<PrLookupError> {
     // A repository whose remotes are not GitHub: gh's advice names `gh auth login` too, but
@@ -544,7 +565,7 @@ pub fn pr_view_outcome(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> PrLoo
         if let Some(error) = gh_refusal(code, &text) {
             return Err(error);
         }
-        return Err(PrLookupError::Failed(first_line(stderr)));
+        return Err(PrLookupError::Failed(gh_message(stderr)));
     }
     let value: Value = serde_json::from_slice(stdout)
         .map_err(|error| PrLookupError::Failed(format!("unreadable gh output: {error}")))?;
@@ -609,7 +630,7 @@ pub(super) fn system_merge_pull_request(
     if let Some(error) = gh_refusal(output.status.code(), &text) {
         return Err(error.message());
     }
-    Err(first_line(&output.stderr))
+    Err(gh_message(&output.stderr))
 }
 
 /// Whether `branch` is still on `remote`, asked over the network under the fetch bound.
@@ -639,6 +660,36 @@ pub(super) fn system_remote_branch_exists(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_message_drops_only_the_leading_failure_glyph() {
+        for raw in [
+            "X Pull request o/r#189 is not mergeable: the head branch is not up to date.\n",
+            "✗ Pull request o/r#189 is not mergeable: the head branch is not up to date.\n",
+            "✘ Pull request o/r#189 is not mergeable: the head branch is not up to date.\n",
+            "\n  X Pull request o/r#189 is not mergeable: the head branch is not up to date.\n",
+        ] {
+            assert_eq!(
+                gh_message(raw.as_bytes()),
+                "Pull request o/r#189 is not mergeable: the head branch is not up to date."
+            );
+        }
+        // Every line of gh's message stays, joined into one.
+        assert_eq!(
+            gh_message(
+                b"X Pull request o/r#189 is not mergeable: the head branch is not up to date.\n\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\n"
+            ),
+            "Pull request o/r#189 is not mergeable: the head branch is not up to date. To have the pull request merged after all the requirements have been met, add the `--auto` flag."
+        );
+        // Anything else stays verbatim, a word starting with X included.
+        assert_eq!(gh_message(b"XML parse error"), "XML parse error");
+        assert_eq!(
+            gh_message(b"GraphQL: Base branch was modified"),
+            "GraphQL: Base branch was modified"
+        );
+        assert_eq!(gh_message(b"X"), "X");
+        assert_eq!(gh_message(b""), "no output");
+    }
 
     #[test]
     fn each_merge_method_passes_its_own_flag_and_never_a_bypass() {
@@ -698,7 +749,10 @@ mod tests {
         assert_eq!(PrLookupError::NoGithubRemote.message(), "no GitHub remote");
         assert_eq!(
             pr_view_outcome(Some(1), b"", b"\nGraphQL: something broke\nmore\n"),
-            Err(PrLookupError::Failed("GraphQL: something broke".into()))
+            // gh's whole message, every line, on one line.
+            Err(PrLookupError::Failed(
+                "GraphQL: something broke more".into()
+            ))
         );
     }
 
