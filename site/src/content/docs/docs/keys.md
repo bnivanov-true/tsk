@@ -11,11 +11,13 @@ Press `?` on the board, task page, or another non-text surface for a searchable 
 
 | Action | Key |
 | --- | --- |
-| Select previous / next task | `↑` / `↓` or `k` / `j` |
+| Select previous / next row (tasks and group headers) | `↑` / `↓` or `k` / `j` |
 | Enter / leave multi-select | `Shift+M` |
 | Mark current task, then move in multi-select | `Shift+↑` / `Shift+↓` |
 | Mark / unmark cursored task in multi-select | `Space` |
 | Open task full screen | `Enter` |
+| Open a group sub-header's board: its project, the desk, or its thread's view | `Enter` on the sub-header |
+| Fold / unfold the header under the cursor: a sub-group, the inbox, or archived | `←` / `→` or `h` / `l` |
 | Peek / close peek below 110 columns | `→` / `←` or `l` / `h` |
 | Move through wide views | `→` / `←` or `l` / `h` |
 | Add task | `+` |
@@ -30,10 +32,14 @@ Press `?` on the board, task page, or another non-text surface for a searchable 
 | Undo completion/deletion; restore an archived selection | `ctrl+u` |
 | Archive / restore selected task (archived tasks live in the done drawer's archived group) | `ctrl+f` |
 | Open / close done drawer | `d` |
-| Fold or unfold the group: the inbox, or archived in the done drawer | `g` |
+| Group by none / project / thread | `g` |
+| Sort by recent / project / thread / title | `s` |
+| Fold or unfold the cursor's group: a sub-group (inbox sub-groups included), the inbox, or archived in the done drawer | `f` |
+| Fold or unfold every group in view | `Shift+F` |
 | Desk / selected project / projects | `1` / `2` / `3` |
 | Project picker | `p` |
-| Project thread filter | `t` |
+| Filter: thread and project on the desk, thread on a project board | `t` |
+| Switch the desk filter's threads / projects tab | `←` / `→` |
 | Cross-project view selector | `v` on Projects |
 | Search current board rows | `/` |
 | Command palette | `:` |
@@ -46,7 +52,11 @@ Press `?` on the board, task page, or another non-text surface for a searchable 
 
 `Esc` leaves multi-select and clears its marks first, then closes the current layer. At the full-board root on any tab, with multi-select inactive, it quits without confirmation rather than switching back to the desk. In either wide split, `Esc` closes the right column after any editor or overlay is dismissed. A further `Esc` at the full-board root quits. A project preview with unsaved work refuses to close. If narrowing the terminal hides the right column, the visible board/index is already at the root: `Esc` quits without an extra collapse, unless a parked draft blocks quitting.
 
-`Shift+M` enters or leaves multi-select while the board owns input. While it is active, `Space`, shifted arrows, and a plain task click change marks instead of opening a task. Removing the last mark leaves the mode active. `Shift+M` again from the board, `Esc`, a task action, or a lens change leaves it and clears the set. Text entry keeps `Shift+M` as a capital `M`; `Esc` leaves multi-select before cancelling that surface.
+Bare `s` and `f` are navigation beside their Ctrl verbs, like `d` beside `ctrl+d`: `s` sorts while `ctrl+s` starts, and `f` folds while `ctrl+f` archives.
+
+On a fold header (a group sub-header, the inbox, or archived in the done drawer), `←` / `h` folds it when it is open and `→` / `l` unfolds it when it is folded; the cursor stays on the header. When there is nothing to fold or unfold, the key keeps its usual meaning (the peek, or the wide stage slider), so a header never blocks the slider. `Enter` on a group sub-header opens its project's board, the desk, or its thread's cross-project view; `no thread` opens nothing, and `Enter` on the inbox or archived header does nothing. A click on any header only selects it; a double-click opens a sub-header's board, or folds and unfolds a header that opens nothing (`no thread`, `desk` on the desk, the inbox, archived).
+
+`Shift+M` enters or leaves multi-select while the board owns input. On a group sub-header it unfolds the group and marks all its tasks, adding them to the set when multi-select is already on. While it is active, `Space`, shifted arrows, and a plain task click change marks instead of opening a task. Removing the last mark leaves the mode active. `Shift+M` again from the board, `Esc`, a task action, or a lens change leaves it and clears the set. Text entry keeps `Shift+M` as a capital `M`; `Esc` leaves multi-select before cancelling that surface.
 
 When tasks are marked, the status, delete, and archive shortcuts act on that set; without marks they act on the cursor. `Enter` and `ctrl+e` remain cursor-only. `ctrl+s` starts each eligible open or ready task and leaves started, blocked, and review tasks unchanged. Marked done tasks are skipped too, and the status row says so: `started N · skipped M done (ctrl+n or ctrl+o reopens them)`. Bulk block and review toggles send every target to blocked or review unless all targets already have that status, in which case they all return to ready. `ctrl+n` and `ctrl+o` can send done tasks directly to ready or open. One `ctrl+u` reverses an entire marked completion or deletion.
 
@@ -150,7 +160,7 @@ On **Projects Overview** at 110+ columns, clicking a row or moving the index sel
 | Split, index focused | Rail | Full board | Full board |
 | Rail, right board focused | Narrow board keys | Return to index | Return to index |
 
-The right seat keeps its own project-board cursor, multi-select, marked set, and state. Its `→` / `l` and `←` / `h` are peek controls, and `Enter` opens a task page inside the column. `ctrl+d`, `d`, `g`, `+`, and the other board actions apply to the right seat while it is focused.
+The right seat keeps its own project-board cursor, multi-select, marked set, and state. Its `→` / `l` and `←` / `h` are peek controls (and fold controls on a header), and `Enter` opens a task page inside the column. `ctrl+d`, `d`, `g`, `s`, `f`, `+`, and the other board actions apply to the right seat while it is focused; its group, sort, and folds are its own.
 
 `h` and `l` are navigation aliases only while a board or task view owns input. Text editors, quick-add, search, filters, the palette, and Help continue to insert them as ordinary characters.
 

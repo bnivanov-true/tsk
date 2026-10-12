@@ -326,6 +326,8 @@ fn verb_intent(model: &BoardModel, index: usize) -> Option<BoardIntent> {
         "?" => Some(BoardIntent::OpenHelp),
         "/" => Some(BoardIntent::FocusSearch),
         "+" => Some(BoardIntent::OpenCapture),
+        "←" => Some(BoardIntent::FoldHeader),
+        "→" => Some(BoardIntent::UnfoldHeader),
         _ => None,
     }
 }
@@ -898,6 +900,12 @@ pub fn map_board_mouse(
             Some(QueueHitTarget::ListPickerOption(index)) => {
                 Some(BoardIntent::SelectListOption(index))
             }
+            Some(QueueHitTarget::PickerTab(tab)) => {
+                Some(BoardIntent::SwitchListPickerTab(Some(match tab {
+                    crate::ui::board::PickerTab::Main => crate::ui::board::FilterTab::Threads,
+                    crate::ui::board::PickerTab::Archived => crate::ui::board::FilterTab::Projects,
+                })))
+            }
             Some(QueueHitTarget::ModalChrome) => None,
             Some(QueueHitTarget::ModalClose) => Some(BoardIntent::CancelListPicker),
             _ => Some(BoardIntent::CancelListPicker),
@@ -929,8 +937,15 @@ pub fn map_board_mouse(
             Some(QueueHitTarget::Search) => Some(BoardIntent::FocusSearch),
             Some(QueueHitTarget::ProjectRow(index)) => Some(BoardIntent::SelectProjectRow(index)),
             Some(QueueHitTarget::Drawer) => Some(BoardIntent::ToggleDoneDrawer),
-            Some(QueueHitTarget::ArchivedHeader) => Some(BoardIntent::ToggleArchivedGroup),
-            Some(QueueHitTarget::InboxHeader) => Some(BoardIntent::ToggleInboxGroup),
+            Some(QueueHitTarget::ArchivedHeader) => Some(BoardIntent::ClickHeader(
+                crate::ui::queue::ARCHIVED_HEADER_ROW_ID,
+            )),
+            Some(QueueHitTarget::InboxHeader) => Some(BoardIntent::ClickHeader(
+                crate::ui::queue::INBOX_HEADER_ROW_ID,
+            )),
+            Some(QueueHitTarget::GroupHeader(id)) => Some(BoardIntent::ClickHeader(id)),
+            Some(QueueHitTarget::NavGroup) => Some(BoardIntent::OpenGroupPicker),
+            Some(QueueHitTarget::NavSort) => Some(BoardIntent::OpenSortPicker),
             Some(QueueHitTarget::TaskNumber(id))
                 if model.mark_mode_active() && mouse.modifiers.is_empty() =>
             {

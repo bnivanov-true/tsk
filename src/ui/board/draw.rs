@@ -125,34 +125,30 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
         ];
     }
 
-    // Header rows hold the selection: their own verbs only.
-    if model.archived_header_selected() {
-        return vec![
+    // Header rows hold the selection: their own verbs only. Every fold header folds with
+    // ← and unfolds with →; a group sub-header that names a board also opens it.
+    if let Some(folded) = model.selected_header_folded() {
+        let opens = model
+            .selection_id
+            .and_then(|id| model.group_header_target(id))
+            .is_some_and(|target| model.group_target_opens(&target));
+        let mut items = Vec::with_capacity(4);
+        if opens {
+            items.push(OPEN);
+        }
+        items.push(if folded {
             VerbEntry {
-                key: "enter",
-                label: if model.archived_collapsed {
-                    "expand"
-                } else {
-                    "collapse"
-                },
-            },
-            ADD,
-            HELP,
-        ];
-    }
-    if model.inbox_header_selected() {
-        return vec![
+                key: "→",
+                label: "unfold",
+            }
+        } else {
             VerbEntry {
-                key: "enter",
-                label: if model.inbox_collapsed {
-                    "expand"
-                } else {
-                    "collapse"
-                },
-            },
-            ADD,
-            HELP,
-        ];
+                key: "←",
+                label: "fold",
+            }
+        });
+        items.extend([ADD, HELP]);
+        return items;
     }
 
     // While a delete notice is on the status row, the bar leads with its undo and keeps
@@ -765,17 +761,25 @@ fn nav_paint(model: &BoardModel) -> NavPaint {
             .unwrap_or_else(|| "select project".to_string()),
     };
     let chip = match (&model.board_location, model.projects_view()) {
+        (BoardLocation::Desk, _) => Some(NavChipPaint {
+            label: model.desk_filter().label(),
+            kind: NavChipKind::ThreadFilter,
+            optional: model.desk_filter().is_all(),
+        }),
         (BoardLocation::Project(_), _) => Some(NavChipPaint {
             label: model.thread_filter().label(),
             kind: NavChipKind::ThreadFilter,
+            optional: false,
         }),
         (BoardLocation::Projects, ProjectsView::Overview) => Some(NavChipPaint {
             label: "Overview".to_string(),
             kind: NavChipKind::ProjectsView,
+            optional: false,
         }),
         (BoardLocation::Projects, ProjectsView::Thread(name)) => Some(NavChipPaint {
             label: format!("#{name}"),
             kind: NavChipKind::ProjectsView,
+            optional: false,
         }),
         _ => None,
     };
@@ -784,6 +788,10 @@ fn nav_paint(model: &BoardModel) -> NavPaint {
         slot2_label,
         slot2_project: model.selected_project().is_some() || model.focus_is_archived(),
         chip,
+        layout: (!model.projects_overview()).then(|| render::LayoutPaint {
+            group: model.layout().group.word(),
+            sort: model.layout().sort.word(),
+        }),
     }
 }
 
@@ -841,6 +849,7 @@ struct OverlayPayloads<'a> {
     list_picker_query: Option<String>,
     list_picker_selected: usize,
     scope_tabs: Option<render::PickerTabsPaint>,
+    list_picker_tabs: Option<render::PickerTabsPaint>,
     launch_card_name: Option<String>,
     scope_selected: usize,
 }
@@ -925,6 +934,12 @@ impl<'a> OverlayPayloads<'a> {
         let scope_tabs = model.picker_tab().map(|tab| render::PickerTabsPaint {
             archived_active: tab == PickerTab::Archived,
             archived_count: model.archived_project_options().len(),
+            filter: false,
+        });
+        let list_picker_tabs = model.list_picker_tab().map(|tab| render::PickerTabsPaint {
+            archived_active: tab == crate::ui::board::FilterTab::Projects,
+            archived_count: 0,
+            filter: true,
         });
         Self {
             help_lines,
@@ -933,6 +948,7 @@ impl<'a> OverlayPayloads<'a> {
             list_picker_options,
             list_picker_query,
             list_picker_selected,
+            list_picker_tabs,
             scope_selected,
             scope_tabs,
             launch_card_name,
@@ -1038,6 +1054,9 @@ impl<'a> OverlayPayloads<'a> {
         if model.input_mode() == BoardInputMode::ListPicker {
             let title = match model.list_picker_kind() {
                 Some(crate::ui::board::ListPickerKind::ProjectsView) => "projects View",
+                Some(crate::ui::board::ListPickerKind::DeskFilter) => "filter",
+                Some(crate::ui::board::ListPickerKind::GroupBy) => "group by",
+                Some(crate::ui::board::ListPickerKind::SortBy) => "sort by",
                 _ => "thread filter",
             };
             return Some(QueueOverlay::ScopeDropdown {
@@ -1045,7 +1064,7 @@ impl<'a> OverlayPayloads<'a> {
                 selected: self
                     .list_picker_selected
                     .min(self.list_picker_options.len().saturating_sub(1)),
-                tabs: None,
+                tabs: self.list_picker_tabs,
                 title: Some(title),
                 query: self.list_picker_query.as_deref(),
             });
@@ -1239,9 +1258,8 @@ fn draw_board_hits(frame: &mut Frame, model: &BoardModel) -> render::QueueHitMap
         marked_ids: model.marked_ids.clone(),
         nav: nav_paint(model),
         surface,
-        thread_labels: surface == BoardSurface::Project
-            && model.thread_filter() == &ThreadFilter::All,
-        show_project_meta: matches!(surface, BoardSurface::Desk | BoardSurface::ThreadView),
+        thread_labels: model.row_label_dimensions().0,
+        show_project_meta: model.row_label_dimensions().1,
         projects: &queue_view.projects,
         projects_index: surface == BoardSurface::Projects
             && matches!(model.projects_view(), ProjectsView::Overview),
@@ -1265,6 +1283,7 @@ fn draw_board_hits(frame: &mut Frame, model: &BoardModel) -> render::QueueHitMap
         inbox_collapsed: model.inbox_collapsed,
         inbox_header_selected: model.inbox_header_selected(),
         rows_dim: model.focus_is_archived(),
+        folded_groups: model.layout().folded.clone(),
     };
     let (hits, painted_list_scroll) = render::draw_queue_frame(frame, &frame_model, &geo, area);
     if let Some((scroll, max_scroll)) = painted_list_scroll {
@@ -1420,9 +1439,8 @@ fn draw_wide_board(
         marked_ids: model.marked_ids.clone(),
         nav: nav_paint(model),
         surface,
-        thread_labels: surface == BoardSurface::Project
-            && model.thread_filter() == &ThreadFilter::All,
-        show_project_meta: matches!(surface, BoardSurface::Desk | BoardSurface::ThreadView),
+        thread_labels: model.row_label_dimensions().0,
+        show_project_meta: model.row_label_dimensions().1,
         projects: &queue_view.projects,
         projects_index: surface == BoardSurface::Projects
             && matches!(model.projects_view(), ProjectsView::Overview),
@@ -1450,6 +1468,7 @@ fn draw_wide_board(
         inbox_collapsed: model.inbox_collapsed,
         inbox_header_selected: model.inbox_header_selected(),
         rows_dim: model.focus_is_archived(),
+        folded_groups: model.layout().folded.clone(),
     };
     let task_frame = QueueFrameModel {
         overlay: task_overlay.clone(),
@@ -1693,6 +1712,7 @@ fn draw_projects_wide_board(
         inbox_collapsed: model.inbox_collapsed,
         inbox_header_selected: false,
         rows_dim: false,
+        folded_groups: BTreeSet::new(),
     };
 
     let right_frame = right.and_then(|right| {
@@ -1706,8 +1726,8 @@ fn draw_projects_wide_board(
             marked_ids: right.marked_ids.clone(),
             nav: nav_paint(right),
             surface: BoardSurface::Project,
-            thread_labels: right.thread_filter() == &ThreadFilter::All,
-            show_project_meta: false,
+            thread_labels: right.row_label_dimensions().0,
+            show_project_meta: right.row_label_dimensions().1,
             projects: &[],
             projects_index: false,
             projects_cursor: 0,
@@ -1732,6 +1752,7 @@ fn draw_projects_wide_board(
             inbox_collapsed: right.inbox_collapsed,
             inbox_header_selected: right.inbox_header_selected(),
             rows_dim: stage == tier::WideStage::Split || right.focus_is_archived(),
+            folded_groups: right.layout().folded.clone(),
         })
     });
     let footer_frame = if right_focused {
