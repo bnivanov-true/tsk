@@ -531,6 +531,18 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
         key: "enter",
         label: "open",
     };
+    const UNDO: VerbEntry<'static> = VerbEntry {
+        key: "u",
+        label: "undo",
+    };
+    // After a delete the board's navigation legends lead with its undo. The seat follows the
+    // delete's undo entry, not the status-row notice: the notice clears on the next move or
+    // after a few seconds, while `ctrl+u` keeps meaning "undo that delete" until the entry is
+    // undone, superseded, or stale. It is Normal-mode only, and an open palette covers it
+    // just as it covers the notice.
+    let undo_seat = model.undo_hint_live()
+        && model.input_mode() == BoardInputMode::Normal
+        && model.surface == CommandSurface::None;
 
     if model.input_mode() == BoardInputMode::Search {
         return vec![
@@ -636,14 +648,19 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
     if model.nav_tab() == crate::ui::queue::NavTab::Projects
         && matches!(model.projects_view(), ProjectsView::Overview)
     {
-        return vec![
+        let mut items = Vec::with_capacity(4);
+        if undo_seat {
+            items.push(UNDO);
+        }
+        items.extend([
             OPEN,
             VerbEntry {
                 key: "/",
                 label: "search",
             },
             HELP,
-        ];
+        ]);
+        return items;
     }
 
     // Header rows hold the selection: their own verbs only. Every fold header folds with
@@ -653,7 +670,10 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
             .selection_id
             .and_then(|id| model.group_header_target(id))
             .is_some_and(|target| model.group_target_opens(&target));
-        let mut items = Vec::with_capacity(4);
+        let mut items = Vec::with_capacity(5);
+        if undo_seat {
+            items.push(UNDO);
+        }
         if opens {
             items.push(OPEN);
         }
@@ -672,19 +692,16 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
         return items;
     }
 
-    // While a delete notice is on the status row, the bar leads with its undo and keeps
-    // only the selected row's first truthful status verb: exactly the five-seat compact
-    // budget with a selection, so no tier clips an action. The remaining status verbs stay
-    // on their keys and in `:` until the notice clears. The seat is Normal-mode only,
-    // because every other surface hides the notice it belongs to.
-    if model.visible_delete_notice().is_some() && model.input_mode() == BoardInputMode::Normal {
-        let selected_task = model
-            .selected_id()
-            .and_then(|id| model.tasks.iter().find(|t| t.id == id));
-        let mut armed = vec![VerbEntry {
-            key: "u",
-            label: "undo",
-        }];
+    // On a task row the undo seat keeps only the selected row's first truthful status verb:
+    // exactly the five-seat compact budget with a selection, so no tier clips an action. The
+    // remaining status verbs stay on their keys and in `:`. On an archived row `ctrl+u`
+    // restores that row instead, so the seat stands down there rather than name the wrong
+    // action.
+    let selected_task = model
+        .selected_id()
+        .and_then(|id| model.tasks.iter().find(|t| t.id == id));
+    if undo_seat && !selected_task.is_some_and(|task| task.archived) {
+        let mut armed = vec![UNDO];
         if let Some(task) = selected_task {
             armed.push(OPEN);
             if let Some(verb) = status_verbs(task.status).into_iter().next() {
@@ -695,9 +712,6 @@ pub fn board_verb_items(model: &BoardModel) -> Vec<VerbEntry<'static>> {
         armed.push(HELP);
         return armed;
     }
-    let selected_task = model
-        .selected_id()
-        .and_then(|id| model.tasks.iter().find(|t| t.id == id));
     let mut entries = Vec::with_capacity(6);
     if let Some(task) = selected_task {
         entries.push(OPEN);
@@ -2432,7 +2446,7 @@ fn status_row_content(model: &BoardModel) -> (Option<String>, Option<usize>, Opt
             "deleted {count} {} · {BULK_DELETE_NOTICE_UNDO}",
             if count == 1 { "task" } else { "tasks" }
         ),
-        None => notice_framed(title, true),
+        None => notice_framed(model.delete_notice_label(), title, true),
     });
     let status_owned = match (notice.as_deref(), model.message()) {
         (Some(notice), Some(msg)) => Some(format!("{notice}  ·  {msg}")),

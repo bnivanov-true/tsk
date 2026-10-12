@@ -247,6 +247,7 @@ pub fn board_idle_tick(
     active_animations: bool,
 ) -> io::Result<FramePoll> {
     model.expire_ephemeral_message();
+    model.expire_delete_notice();
     let poll = board_frame(model, paint, wait, active_animations)?;
     if poll == FramePoll::Idle {
         revalidate_board_from_store(store, domain, model, watch, save_recovery);
@@ -1310,6 +1311,9 @@ pub fn apply_board_intent_with_save_recovery(
             BoardIntent::CancelSave => {
                 model.close_command_surface();
                 *domain = recovery.cancel().expect("pending recovery has a baseline");
+                // The failed mutation may have dropped the footer's undo hint; the baseline
+                // decides whether it is live again.
+                model.restore_undo_hint_before_save();
                 resolve_save_recovery(model, domain, SaveResolution::Cancelled);
                 return Ok(IntentOutcome::None);
             }
