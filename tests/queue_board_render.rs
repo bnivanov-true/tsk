@@ -16,8 +16,8 @@ use tsk_tui::domain::{
 use tsk_tui::ui::input::map_key;
 use tsk_tui::ui::queue::{self, BoardFilter, BoardLens, NavTab, QueueView};
 use tsk_tui::ui::render::{
-    assert_buffer_mono, assert_no_color_sgr, draw_queue_frame, BottomInputSlot, NavChipPaint,
-    NavPaint, PaletteCommandRow, QueueFrameModel, QueueOverlay, VerbEntry,
+    assert_buffer_mono, assert_no_color_sgr, draw_queue_frame, BottomInputSlot, LayoutPaint,
+    NavChipPaint, NavPaint, PaletteCommandRow, QueueFrameModel, QueueOverlay, VerbEntry,
 };
 use tsk_tui::ui::tier::{self, Tier, TierGeometry};
 use tsk_tui::ui::{
@@ -393,9 +393,17 @@ fn fixture_model_on_tab<'a>(
             chip: Some(NavChipPaint {
                 label: "all".to_string(),
                 kind: tsk_tui::ui::render::NavChipKind::ThreadFilter,
+                // The unfiltered desk's chip is idle; a project board's is not.
+                optional: active == NavTab::Desk,
+            }),
+            layout: Some(LayoutPaint {
+                group: "none",
+                sort: "recent",
             }),
         },
         surface: tsk_tui::ui::render::BoardSurface::Desk,
+        thread_labels: false,
+        show_project_meta: true,
         projects: &[],
         projects_index: false,
         projects_cursor: 0,
@@ -420,6 +428,7 @@ fn fixture_model_on_tab<'a>(
         inbox_collapsed: false,
         inbox_header_selected: false,
         rows_dim: false,
+        folded_groups: std::collections::BTreeSet::new(),
     }
 }
 
@@ -553,6 +562,7 @@ fn full_thread_selector_and_dropdown_values_are_not_capped_to_the_old_prefix_bud
         model.nav.chip = Some(NavChipPaint {
             label: format!("#{thread}"),
             kind: tsk_tui::ui::render::NavChipKind::ThreadFilter,
+            optional: false,
         });
         let body_rows = paint(width, height, &model).0;
         if width == 40 {
@@ -1516,7 +1526,8 @@ fn assigned_task_renders_on_the_row_and_before_thread_in_the_page_footer() {
     let row_body = rows.join("\n");
     assert_eq!(
         rows.iter()
-            .filter(|row| row.contains("└─ @reviewer · #release · desk"))
+            // `ON DECK · desk` already names the scope, so the label leaves `desk` out.
+            .filter(|row| row.contains("└─ @reviewer · #release"))
             .count(),
         1,
         "an assigned task's open peek must contain one ordered metadata footer:\n{row_body}"
@@ -3239,6 +3250,7 @@ fn compact_paints_no_takeover_for_a_detail_open_task_excluded_by_the_current_sco
             slot2_label: "tsk".to_string(),
             slot2_project: true,
             chip: None,
+            layout: None,
         },
         ..fixture_model(&tasks, &scoped_view)
     };
@@ -3688,6 +3700,192 @@ fn golden_scenes() -> Vec<GoldenScene> {
             width: 110,
         },
     ]
+    .into_iter()
+    .chain(grouping_scenes())
+    .collect()
+}
+
+/// The fixture board with threads spread across projects and the desk, for the group /
+/// sort / filter scenes.
+fn threaded_fixture_tasks() -> Vec<Task> {
+    let mut tasks = fixture_tasks();
+    for task in &mut tasks {
+        task.thread = match task.id.as_u128() {
+            1 | 10 | 30 => Some("release".to_string()),
+            2 | 20 => Some("dispatch".to_string()),
+            _ => None,
+        };
+    }
+    tasks
+}
+
+/// Drive one list picker the way a user does: open it, then click option `index`.
+fn pick(domain: &mut DomainState, model: &mut BoardModel, open: BoardIntent, index: usize) {
+    apply_intent(domain, model, open, None).expect("open picker");
+    assert_eq!(model.input_mode(), BoardInputMode::ListPicker);
+    apply_intent(domain, model, BoardIntent::SelectListOption(index), None).expect("pick");
+    assert_eq!(model.input_mode(), BoardInputMode::Normal);
+}
+
+/// Pin a scene model's clock so painted ages (the live line's `· 41m`) never follow today.
+fn clocked(mut model: BoardModel) -> BoardModel {
+    model.set_clock(Some(now()));
+    model
+}
+
+fn grouping_scenes() -> Vec<GoldenScene> {
+    let tasks = threaded_fixture_tasks();
+    let mut domain = DomainState::new();
+
+    // Desk grouped by project, sorted by thread, at the three reference widths.
+    let mut desk = clocked(BoardModel::from_tasks(
+        tasks.clone(),
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    pick(&mut domain, &mut desk, BoardIntent::OpenGroupPicker, 1);
+    pick(&mut domain, &mut desk, BoardIntent::OpenSortPicker, 2);
+    let desk_project_110 = board_rows(&desk, 110, 30);
+    let desk_project_78 = board_rows(&desk, 78, 24);
+    let desk_project_40 = board_rows(&desk, 40, 24);
+
+    // Desk grouped by thread, sorted by project.
+    let mut by_thread = clocked(BoardModel::from_tasks(
+        tasks.clone(),
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    pick(&mut domain, &mut by_thread, BoardIntent::OpenGroupPicker, 2);
+    pick(&mut domain, &mut by_thread, BoardIntent::OpenSortPicker, 1);
+    let desk_thread_78 = board_rows(&by_thread, 78, 24);
+
+    // A project board grouped by thread with the cursor's group folded.
+    let mut project_board = clocked(BoardModel::from_tasks(
+        tasks.clone(),
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    project_board.set_selected_project(Some(PathBuf::from("/repos/tsk")));
+    pick(
+        &mut domain,
+        &mut project_board,
+        BoardIntent::OpenGroupPicker,
+        1,
+    );
+    apply_intent(
+        &mut domain,
+        &mut project_board,
+        BoardIntent::FoldGroup,
+        None,
+    )
+    .expect("fold");
+    let project_folded_78 = board_rows(&project_board, 78, 24);
+
+    // A project board grouped by thread whose inbox groups too, under its own fold.
+    let mut inbox_tasks = tasks.clone();
+    let template = inbox_tasks
+        .iter()
+        .find(|task| task.id.as_u128() == 10)
+        .expect("a /repos/tsk task")
+        .clone();
+    for (id, title, thread) in [
+        (50, "Sketch the inbox grouping", Some("release")),
+        (51, "Triage the capture backlog", None),
+        (52, "Note the release checklist gaps", Some("release")),
+    ] {
+        let mut task = template.clone();
+        task.id = Uuid::from_u128(id);
+        task.number = None;
+        task.title = title.to_string();
+        task.thread = thread.map(str::to_string);
+        task.status = HumanStatus::Open;
+        inbox_tasks.push(task);
+    }
+    let mut inbox_board = clocked(BoardModel::from_tasks(
+        inbox_tasks,
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    inbox_board.set_selected_project(Some(PathBuf::from("/repos/tsk")));
+    pick(
+        &mut domain,
+        &mut inbox_board,
+        BoardIntent::OpenGroupPicker,
+        1,
+    );
+    let project_inbox_78 = board_rows(&inbox_board, 78, 24);
+
+    // The desk filter on its projects tab, and the group picker.
+    let mut filter = clocked(BoardModel::from_tasks(
+        tasks.clone(),
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    apply_intent(
+        &mut domain,
+        &mut filter,
+        BoardIntent::OpenThreadFilterPicker,
+        None,
+    )
+    .expect("open desk filter");
+    apply_intent(
+        &mut domain,
+        &mut filter,
+        BoardIntent::SwitchListPickerTab(None),
+        None,
+    )
+    .expect("projects tab");
+    let filter_picker_78 = board_rows(&filter, 78, 24);
+    let mut group_picker = clocked(BoardModel::from_tasks(
+        tasks,
+        Some(PathBuf::from("/repos/tsk")),
+    ));
+    apply_intent(
+        &mut domain,
+        &mut group_picker,
+        BoardIntent::OpenGroupPicker,
+        None,
+    )
+    .expect("open group picker");
+    let group_picker_78 = board_rows(&group_picker, 78, 24);
+
+    vec![
+        GoldenScene {
+            name: "desk_group_project_sort_thread_110x30",
+            rows: desk_project_110,
+            width: 110,
+        },
+        GoldenScene {
+            name: "desk_group_project_sort_thread_78x24",
+            rows: desk_project_78,
+            width: 78,
+        },
+        GoldenScene {
+            name: "desk_group_project_sort_thread_40x24",
+            rows: desk_project_40,
+            width: 40,
+        },
+        GoldenScene {
+            name: "desk_group_thread_sort_project_78x24",
+            rows: desk_thread_78,
+            width: 78,
+        },
+        GoldenScene {
+            name: "project_group_thread_folded_78x24",
+            rows: project_folded_78,
+            width: 78,
+        },
+        GoldenScene {
+            name: "project_inbox_group_thread_78x24",
+            rows: project_inbox_78,
+            width: 78,
+        },
+        GoldenScene {
+            name: "desk_filter_picker_projects_78x24",
+            rows: filter_picker_78,
+            width: 78,
+        },
+        GoldenScene {
+            name: "group_picker_78x24",
+            rows: group_picker_78,
+            width: 78,
+        },
+    ]
 }
 
 /// Boxed plain-text dump matching the shape of the prototype's own `show()` dump, so a
@@ -3853,10 +4051,10 @@ fn footer_lists_the_step_add_verb() {
     );
 }
 
-/// Thread labels are row meta on the project board: they paint beside their own task
-/// row, never as a decorative header block, and rows stay flush left.
+/// Thread labels are row meta on the project board: they paint at their own task row's
+/// right edge on wide boards, never as a decorative header block, and rows stay flush left.
 #[test]
-fn collapsed_threaded_rows_have_no_labels_or_extra_indent() {
+fn threaded_rows_label_their_thread_without_extra_indent() {
     let mut tasks = fixture_tasks();
     tasks[2].thread = Some("release".to_string());
     tasks[3].thread = Some("release".to_string());
@@ -3881,8 +4079,12 @@ fn collapsed_threaded_rows_have_no_labels_or_extra_indent() {
         .expect("unthreaded task paints");
 
     assert!(
-        !rows.iter().any(|row| row.contains("#release")),
-        "collapsed task hides the thread label:\n{threaded:?}"
+        threaded.trim_end().ends_with("#release"),
+        "a wide row labels its thread at the right edge:\n{threaded:?}"
+    );
+    assert!(
+        !loose.contains('#'),
+        "an unthreaded row carries no label:\n{loose:?}"
     );
     assert!(
         rows.iter()
@@ -4049,7 +4251,8 @@ fn peek_footer_includes_thread_when_set_and_omits_only_the_unset_part() {
     .expect("open threaded peek");
     let threaded_body = board_rows(&threaded_model, 80, 24).join("\n");
     assert!(
-        threaded_body.contains("└─ #release · desk"),
+        // `ON DECK · desk` already names the scope, so the label leaves `desk` out.
+        threaded_body.contains("└─ #release") && !threaded_body.contains("└─ #release · desk"),
         "threaded peek footer:\n{threaded_body}"
     );
 
@@ -4072,7 +4275,8 @@ fn peek_footer_includes_thread_when_set_and_omits_only_the_unset_part() {
     .expect("open unthreaded peek");
     let unthreaded_body = board_rows(&unthreaded_model, 80, 24).join("\n");
     assert!(
-        unthreaded_body.contains("└─ desk") && !unthreaded_body.contains("└─ #"),
+        // Nothing left to say: the footer closes bare.
+        !unthreaded_body.contains("└─"),
         "unthreaded peek footer:\n{unthreaded_body}"
     );
 }
@@ -4137,13 +4341,9 @@ fn all_golden_frames_pass_no_color_sgr_scan() {
         scanned += 1;
     }
     assert_eq!(
-        scanned, 20,
-        "expected the twenty board surface goldens (board, board_marked, \
-         board_default_split_78, board_search, board_search_pinned, board_search_empty, \
-         accordion, palette, help, done_drawer, inbox, done_drawer_archived, \
-         projects_index_50x20, projects_index_110x30, projects_preview_split_110x30, \
-         projects_preview_rail_110x30, filter_picker_40x24, board_filtered_40x24, \
-         board_filtered_long_40x24, board_filtered_long_message_40x24) in {dir:?}"
+        scanned,
+        golden_scenes().len(),
+        "expected one golden per scene in {dir:?}"
     );
 }
 
@@ -5717,7 +5917,7 @@ fn project_and_cross_project_thread_views_omit_count_summaries() {
 }
 
 #[test]
-fn collapsed_short_panes_hide_project_and_thread_labels() {
+fn rows_label_project_and_thread_inline_at_every_width() {
     let mut item = task(
         991,
         "Scope row",
@@ -5728,7 +5928,7 @@ fn collapsed_short_panes_hide_project_and_thread_labels() {
         0,
     );
     item.thread = Some("ship".into());
-    for width in [78, 80, 162] {
+    for width in [40, 77, 78, 80, 162] {
         let mut model = BoardModel::from_tasks(vec![item.clone()], None);
         let desk = board_rows(&model, width, 20);
         let row = desk
@@ -5736,8 +5936,12 @@ fn collapsed_short_panes_hide_project_and_thread_labels() {
             .find(|row| row.contains("Scope row"))
             .expect("desk task row");
         assert!(
+            row.trim_end().ends_with("Scope row  #ship · alpha"),
+            "desk rows label thread and project after the title ({width}): {row}"
+        );
+        assert!(
             !desk.iter().any(|row| row.contains("└─ alpha")),
-            "collapsed project attribution should be hidden at {width}: {row}"
+            "no peek attribution while collapsed at {width}: {row}"
         );
         model.set_selected_project(Some(PathBuf::from("/repos/alpha")));
         let project = board_rows(&model, width, 20);
@@ -5746,14 +5950,18 @@ fn collapsed_short_panes_hide_project_and_thread_labels() {
             .find(|row| row.contains("Scope row"))
             .expect("project task row");
         assert!(
-            !project.iter().any(|row| row.contains("#ship")),
-            "collapsed thread attribution should be hidden at {width}: {row}"
+            row.trim_end().ends_with("Scope row  #ship"),
+            "project rows label their thread after the title ({width}): {row}"
+        );
+        assert!(
+            !row.contains("alpha"),
+            "a project board never labels its own project ({width}): {row}"
         );
     }
 }
 
 #[test]
-fn collapsed_wide_compact_rows_hide_thread_labels() {
+fn wide_compact_rows_still_label_threads() {
     let mut domain = DomainState::new();
     domain
         .create(
@@ -5781,8 +5989,8 @@ fn collapsed_wide_compact_rows_hide_thread_labels() {
     model.set_selected_project(Some(PathBuf::from("/repos/alpha")));
     let project = board_rows(&model, 162, 20).join("\n");
     assert!(
-        !project.contains("#release"),
-        "collapsed thread attribution should be hidden in wide compact mode:\n{project}"
+        project.contains("#release"),
+        "a short but wide board still labels threads:\n{project}"
     );
 }
 
@@ -6290,9 +6498,10 @@ fn attribution_appears_only_at_bottom_of_open_peek() {
             .unwrap();
         if !peek {
             assert!(
-                !rows.iter().any(|row| row.contains("#release")),
-                "collapsed task must have no label"
+                rows[title].trim_end().ends_with("#release"),
+                "a collapsed wide row carries its label on the row"
             );
+            assert!(!rows.iter().any(|row| row.contains('└')));
             continue;
         }
         let label = rows
@@ -6813,6 +7022,8 @@ fn live_lines_sit_under_their_rows_and_the_right_edge_stays_empty() {
     let view = fixture_view_projects(&tasks, false);
     let mut model = fixture_model_on_tab(&tasks, &view, NavTab::ProjectBoard);
     model.selection_id = Some(Uuid::from_u128(2));
+    // Row labels have their own tests; these rows check the live line alone.
+    model.show_project_meta = false;
     for width in [40u16, 78, 109, 120] {
         let (rows, _) = paint(width, 80, &model);
         let body = rows.iter().map(|row| list_body(row)).collect::<Vec<_>>();
@@ -6886,6 +7097,8 @@ fn wrapped_titles_above_a_live_line_carry_a_gutter_in_its_column() {
     let view = fixture_view_projects(&tasks, false);
     let mut model = fixture_model_on_tab(&tasks, &view, NavTab::ProjectBoard);
     model.selection_id = Some(Uuid::from_u128(2));
+    // Row labels have their own tests; these rows check the live line alone.
+    model.show_project_meta = false;
     // The row's own lines: its first line, then every continuation down to the next row.
     let block = |body: &[String], number: u64| -> Vec<String> {
         let head = format!("T{number} {number} Make");
@@ -7250,4 +7463,75 @@ fn notice_rows_carry_no_live_line_and_peek_their_notes() {
             "{body:#?}"
         );
     }
+}
+/// Row labels did not change the peek: on the desk it still names only the project.
+#[test]
+fn desk_peek_names_the_full_label_the_row_carried() {
+    let mut item = task(
+        9920,
+        "Threaded project task",
+        HumanStatus::Started,
+        project("/repos/alpha"),
+        0,
+    );
+    item.thread = Some("ship".into());
+    let mut model = BoardModel::from_tasks(vec![item], None);
+    let collapsed = board_rows(&model, 80, 24);
+    let row = collapsed
+        .iter()
+        .find(|row| row.contains("Threaded project task"))
+        .expect("row");
+    assert!(row.trim_end().ends_with("#ship · alpha"), "{row}");
+    let mut domain = DomainState::new();
+    apply_intent(&mut domain, &mut model, BoardIntent::PeekDetail, None).unwrap();
+    let rows = board_rows(&model, 80, 24);
+    let attribution = rows
+        .iter()
+        .find(|row| row.contains("└─"))
+        .expect("peek attribution");
+    assert_eq!(
+        attribution.trim(),
+        "└─ #ship · alpha",
+        "the thread never vanishes when the row is peeked"
+    );
+    let peeked = rows
+        .iter()
+        .find(|row| row.contains("Threaded project task"))
+        .expect("row");
+    assert!(!peeked.contains("#ship"), "the label paints once: {peeked}");
+}
+
+#[test]
+fn task_page_rail_rows_carry_their_labels() {
+    let mut item = task(
+        9930,
+        "Threaded project task",
+        HumanStatus::Started,
+        project("/repos/alpha"),
+        0,
+    );
+    item.thread = Some("ship".into());
+    let mut model = BoardModel::from_tasks(vec![item], None);
+    let mut domain = DomainState::new();
+    for _ in 0..2 {
+        apply_intent(&mut domain, &mut model, BoardIntent::StageRight, None).unwrap();
+    }
+    assert_eq!(model.wide_stage(), tsk_tui::ui::tier::WideStage::Rail);
+    let rail = tsk_tui::ui::tier::resolve_responsive(130, 30, model.wide_stage());
+    let rows = board_rows(&model, 130, 30);
+    let column: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(rail.board.x as usize)
+                .take(rail.board.width as usize)
+                .collect::<String>()
+        })
+        .collect();
+    let text = column.join("\n");
+    assert!(text.contains("Threaded"), "{text}");
+    assert!(
+        column.iter().any(|row| row.contains("#ship · alpha")),
+        "the rail row keeps its label: {text}"
+    );
 }

@@ -1,18 +1,18 @@
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                │
-│ desk  ·  tsk ▾  ·  projects                                              all ▾ │
+│ desk  ·  tsk ▾  ·  projects             group: none ▾   sort: recent ▾   all ▾ │
 │                                                                                │
 │ NEEDS YOU ───────────────────────────────────────────────────────────────────2 │
 │                                                                                │
-│  ■ T5 Wire dispatch cleanup receipts                                           │
+│  ■ T5 Wire dispatch cleanup receipts  herdr                                    │
 │    └─ @claude blocked on you · 41m                                             │
-│  ▲ T6 Docs refresh pass after F9 ships                                         │
+│  ▲ T6 Docs refresh pass after F9 ships  herdr                                  │
 │    └─ needs your review · 3h                                                   │
 │                                                                                │
 │ IN MOTION ───────────────────────────────────────────────────────────────────2 │
 │                                                                                │
-│▸ ● T1 Smoke-test worktree dispatch                                             │
-│  ● T2 Edit target binding pin                                                  │
+│▸ ● T1 Smoke-test worktree dispatch  tsk                                        │
+│  ● T2 Edit target binding pin  herdr                                           │
 │                                                                                │
 │ ON DECK · desk ──────────────────────────────────────────────────────────────1 │
 │                                                                                │

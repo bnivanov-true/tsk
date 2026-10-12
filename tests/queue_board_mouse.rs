@@ -1740,7 +1740,7 @@ fn wheel_scrolls_the_open_command_surface_so_every_command_becomes_reachable() {
     let commands = model.visible_commands();
     assert_eq!(
         commands.len(),
-        16,
+        19,
         "this ready fixture must expose every palette command a ready selection has: {commands:?}"
     );
     let last = commands.len() - 1;
@@ -3484,7 +3484,7 @@ fn task_page_autoscroll_tick_moves_notes() {
 }
 
 #[test]
-fn archived_group_is_collapsed_on_a_fresh_model_and_enter_or_click_on_the_header_toggles_it() {
+fn archived_group_is_collapsed_on_a_fresh_model_and_a_double_click_on_the_header_toggles_it() {
     let mut domain = DomainState::new();
     let archived = domain
         .create(
@@ -3507,15 +3507,24 @@ fn archived_group_is_collapsed_on_a_fresh_model_and_enter_or_click_on_the_header
         .expect("the archived header paints a hit region");
     let intent = map_board_mouse(&model, &hits, left_click(header.area.x, header.area.y))
         .expect("a header click maps to an intent");
-    assert_eq!(intent, BoardIntent::ToggleArchivedGroup);
+    assert_eq!(
+        intent,
+        BoardIntent::ClickHeader(tsk_tui::ui::queue::ARCHIVED_HEADER_ROW_ID)
+    );
+    apply_intent(&mut domain, &mut model, intent.clone(), None).expect("select");
+    assert!(model.archived_header_selected());
+    assert!(
+        !model.visible_ids().contains(&archived),
+        "a single click only selects"
+    );
     apply_intent(&mut domain, &mut model, intent, None).expect("toggle");
 
     assert!(
         model.visible_ids().contains(&archived),
-        "the click expanded the group: archived row visible"
+        "the double-click expanded the group: archived row visible"
     );
 
-    // Click again: collapses.
+    // Double-click again: collapses.
     let hits = board_hit_map(STANDARD, &model);
     let header = hits
         .regions
@@ -3524,10 +3533,11 @@ fn archived_group_is_collapsed_on_a_fresh_model_and_enter_or_click_on_the_header
         .expect("header hit after expand");
     let intent = map_board_mouse(&model, &hits, left_click(header.area.x, header.area.y))
         .expect("header click maps after expand");
+    apply_intent(&mut domain, &mut model, intent.clone(), None).expect("select");
     apply_intent(&mut domain, &mut model, intent, None).expect("toggle closed");
     assert!(
         !model.visible_ids().contains(&archived),
-        "the second click collapsed the group"
+        "the second double-click collapsed the group"
     );
 }
 
@@ -3821,7 +3831,8 @@ fn peek_attribution_is_copyable_but_not_a_task_click_target() {
     assert!(hits
         .copyable
         .iter()
-        .any(|area| area.y == y && area.x == 7 && area.width == 14));
+        // `#release` alone: a project board leaves its own project out of the label.
+        .any(|area| area.y == y && area.x == 7 && area.width == 8));
     assert_eq!(map_board_mouse(&model, &hits, left_click(8, y)), None);
 }
 

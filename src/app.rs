@@ -997,12 +997,43 @@ fn board_keyboard_intent_for_area(
     mode: BoardInputMode,
     key: crossterm::event::KeyEvent,
 ) -> Option<BoardIntent> {
+    if let Some(intent) = header_fold_key_intent(model, mode, key) {
+        return Some(intent);
+    }
     let presentation = model.responsive_geometry(area).presentation;
     match route_responsive_key(mode, model.input_stage(), presentation, key) {
         ResponsiveKeyRoute::Intent(intent) => Some(intent),
         ResponsiveKeyRoute::Inert => None,
         ResponsiveKeyRoute::Surface => board_keyboard_intent(model, mode, key),
     }
+}
+
+/// `→` / `l` on a folded fold header unfolds it and `←` / `h` on an unfolded one folds it,
+/// ahead of the wide slider and the peek. With nothing to fold or unfold the key keeps its
+/// usual meaning, so a header never blocks the slider.
+fn header_fold_key_intent(
+    model: &BoardModel,
+    mode: BoardInputMode,
+    key: crossterm::event::KeyEvent,
+) -> Option<BoardIntent> {
+    use crossterm::event::KeyEventKind;
+    if mode != BoardInputMode::Normal
+        || !model.task_list_owns_input()
+        || !key.modifiers.is_empty()
+        || !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+    {
+        return None;
+    }
+    let fold = match key.code {
+        KeyCode::Left | KeyCode::Char('h') => true,
+        KeyCode::Right | KeyCode::Char('l') => false,
+        _ => return None,
+    };
+    (model.selected_header_folded() == Some(!fold)).then_some(if fold {
+        BoardIntent::FoldHeader
+    } else {
+        BoardIntent::UnfoldHeader
+    })
 }
 
 fn board_keyboard_intent(
@@ -1302,7 +1333,12 @@ pub fn apply_board_intent_with_save_recovery(
             | BoardIntent::PageWheelScrollDown
             | BoardIntent::ToggleDoneDrawer
             | BoardIntent::ToggleArchivedGroup
-            | BoardIntent::ToggleInboxGroup => return apply_intent(domain, model, intent, None),
+            | BoardIntent::ToggleInboxGroup
+            | BoardIntent::FoldGroup
+            | BoardIntent::FoldAllGroups
+            | BoardIntent::FoldHeader
+            | BoardIntent::UnfoldHeader
+            | BoardIntent::ClickHeader(_) => return apply_intent(domain, model, intent, None),
             _ => {
                 model.begin_save_recovery(recovery.error().unwrap_or("save failed"));
                 return Ok(IntentOutcome::None);
@@ -1546,6 +1582,8 @@ fn press_survives_off_focus(
 
 /// Keep a row gesture attached to its original cell and task across a column reflow.
 /// The reducer's existing clock authorizes continuation only after successful selection.
+/// A Projects-preview group sub-header rides the same gesture: its first click slides the
+/// preview from Split to Rail, which moves the header out from under the pointer.
 #[derive(Default)]
 struct ReflowRowClick(Option<(Position, Rect, uuid::Uuid)>);
 
@@ -1582,13 +1620,21 @@ impl ReflowRowClick {
     ) -> Option<uuid::Uuid> {
         use crossterm::event::{MouseButton, MouseEventKind};
         let (pos, frame, id) = self.0?;
-        (mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        let same_press = mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && pos == Position::new(mouse.column, mouse.row)
             && frame == area
-            && model.wide_stage() == crate::ui::tier::WideStage::Split
-            && model.input_mode() == BoardInputMode::Normal
-            && model.pending_row_double_click(id))
-        .then_some(id)
+            && model.input_mode() == BoardInputMode::Normal;
+        let continues = if crate::ui::queue::is_fold_header_id(id) {
+            model.wide_stage() == crate::ui::tier::WideStage::Rail
+                && model.project_right_seat_focused()
+                && model
+                    .right_seat()
+                    .is_some_and(|right| right.pending_group_header_double_click(id))
+        } else {
+            model.wide_stage() == crate::ui::tier::WideStage::Split
+                && model.pending_row_double_click(id)
+        };
+        (same_press && continues).then_some(id)
     }
 }
 
@@ -1607,6 +1653,9 @@ fn board_mouse_click_intent_after_focus<E>(
     // Consume the second release before preview controls or reflowed rows can see it.
     if let Some(id) = reflow_click.target(model, area, click) {
         reflow_click.clear();
+        if crate::ui::queue::is_fold_header_id(id) {
+            return Ok((false, Some(BoardIntent::ClickHeader(id))));
+        }
         let intent = (model.selected_id() == Some(id))
             .then(|| {
                 model
@@ -1627,8 +1676,9 @@ fn board_mouse_click_intent_after_focus<E>(
         // click still names the control the user saw: dispatch it against the painted frame
         // rather than a repaint whose rows no longer line up with the press.
         resolve_board_surface(area, model);
-        model.cancel_project_header_double_click();
-        let intent = map_responsive_board_mouse(model, painted_hits, area, click)
+        let mapped = map_responsive_board_mouse(model, painted_hits, area, click);
+        disarm_double_clicks(model, area, click, painted_hits, mapped.as_ref());
+        let intent = mapped
             .and_then(|intent| board_intent_for_presentation(area, model, intent))
             .and_then(|intent| {
                 resolve_board_command(
@@ -1636,6 +1686,9 @@ fn board_mouse_click_intent_after_focus<E>(
                     intent,
                 )
             });
+        if let Some(BoardIntent::ClickHeader(id)) = intent {
+            reflow_click.0 = Some((Position::new(click.column, click.row), area, id));
+        }
         return Ok((false, intent));
     }
     let intent = board_mouse_intent(area, model, click);
@@ -1736,6 +1789,23 @@ fn mouse_intent_target(
     }
 }
 
+/// Disarm pending double-clicks on both seats for one left press, keeping only the arm the
+/// press itself continues on the seat its intent lands on.
+fn disarm_double_clicks(
+    model: &mut BoardModel,
+    area: Rect,
+    mouse: crossterm::event::MouseEvent,
+    painted_hits: &crate::ui::render::QueueHitMap,
+    intent: Option<&BoardIntent>,
+) {
+    let on_right_seat = model.project_right_seat_focused()
+        && intent.is_some_and(|intent| {
+            mouse_intent_target(model, area, mouse, painted_hits, intent)
+                == BoardIntentTarget::Focused
+        });
+    model.disarm_double_clicks(intent, on_right_seat);
+}
+
 fn mouse_intent_target_mut<'a>(
     model: &'a mut BoardModel,
     area: Rect,
@@ -1784,16 +1854,11 @@ fn board_mouse_intent(
         crate::ui::render::QueueHitMap::default()
     };
     let intent = map_responsive_board_mouse(model, &hits, area, mouse);
-    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        && !matches!(
-            intent,
-            Some(BoardIntent::SelectProjectRow(_) | BoardIntent::CleanupClickOption(_))
-        )
-    {
-        // Any left press that is not an index-row click disarms a pending index-row
-        // double-click: inert cells and other controls (tabs, chips, search) alike.
-        // The header double-click shares the same disarm.
-        model.cancel_project_header_double_click();
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        // Any other left press disarms a pending index-row or header double-click: inert
+        // cells and other controls (tabs, chips, search) alike. The target's own second
+        // press keeps its arm, or the double-click could never land.
+        disarm_double_clicks(model, area, mouse, &hits, intent.as_ref());
     }
     let intent = intent?;
     let intent = board_intent_for_presentation(area, model, intent)?;
@@ -2014,7 +2079,7 @@ fn dispatch_board_intent(
     } else {
         route.target
     };
-    let quit = handle_board_intent(
+    let mut quit = handle_board_intent(
         store,
         domain,
         board_intent_target_mut(model, target),
@@ -2022,6 +2087,10 @@ fn dispatch_board_intent(
         save_recovery,
         quick_capture,
     )?;
+    // A preview seat's sub-header asked for a board only the outer board can show.
+    if let Some(request) = model.take_outer_request().filter(|_| !quit) {
+        quit = handle_board_intent(store, domain, model, request, save_recovery, quick_capture)?;
+    }
     auto_open_projects_preview(route.area, model, &intent_for_preview);
     sync_focused_project_preview(model, domain, save_recovery);
     Ok(quit)
@@ -5783,6 +5852,195 @@ mod tests {
     }
 
     #[test]
+    fn projects_preview_keeps_its_own_group_state() {
+        let (mut domain, mut model, _id) = projects_preview_fixture();
+        let area = Rect::new(0, 0, 110, 30);
+        let intent = preview_key_intent(
+            &mut model,
+            area,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert_eq!(intent, BoardIntent::OpenGroupPicker);
+        apply_intent(&mut domain, model.input_target_mut(), intent, None).expect("open picker");
+        let thread = model
+            .right_seat()
+            .expect("preview seat")
+            .visible_list_picker_options()
+            .iter()
+            .position(|(_, option)| option.label == "thread")
+            .expect("a project board offers thread grouping");
+        apply_intent(
+            &mut domain,
+            model.input_target_mut(),
+            BoardIntent::SelectListOption(thread),
+            None,
+        )
+        .expect("group the preview");
+        let right = model.right_seat().expect("preview seat");
+        assert_eq!(right.layout().group, crate::ui::queue::GroupBy::Thread);
+        assert_eq!(model.layout().group, crate::ui::queue::GroupBy::None);
+    }
+
+    #[test]
+    fn projects_preview_header_paints_group_sort_and_filter_controls_that_click_through() {
+        let (mut domain, mut model, _id) = projects_preview_fixture();
+        let area = Rect::new(0, 0, 110, 30);
+        sync_frame_presentation(area, &model);
+        assert!(model.project_right_seat_focused());
+        let task_column = model.responsive_geometry(area).task;
+        for (target, kind) in [
+            (
+                crate::ui::render::QueueHitTarget::NavGroup,
+                crate::ui::board::ListPickerKind::GroupBy,
+            ),
+            (
+                crate::ui::render::QueueHitTarget::NavSort,
+                crate::ui::board::ListPickerKind::SortBy,
+            ),
+            (
+                crate::ui::render::QueueHitTarget::NavChip,
+                crate::ui::board::ListPickerKind::ThreadFilter,
+            ),
+        ] {
+            let hits = board_hit_map(area, &model);
+            let hit = hits
+                .regions
+                .iter()
+                .find(|hit| hit.target == target && task_column.contains(hit.area.into()))
+                .unwrap_or_else(|| panic!("the preview header paints {target:?}"))
+                .area;
+            let click = left_click(hit.x + 1, hit.y);
+            let intent =
+                map_responsive_board_mouse(&model, &hits, area, click).expect("control click");
+            let seat = mouse_intent_target_mut(&mut model, area, click, &hits, &intent);
+            apply_intent(&mut domain, seat, intent, None).expect("open picker");
+            let right = model.right_seat().expect("preview seat");
+            assert_eq!(right.list_picker_kind(), Some(kind), "{target:?}");
+            assert_eq!(model.list_picker_kind(), None, "the index keeps no picker");
+            apply_intent(
+                &mut domain,
+                model.input_target_mut(),
+                BoardIntent::CancelListPicker,
+                None,
+            )
+            .expect("close picker");
+        }
+    }
+
+    #[test]
+    fn a_split_click_on_a_preview_header_control_slides_and_opens_the_preview_picker() {
+        let (mut domain, mut model) = projects_overview_fixture();
+        stage_right(&mut domain, &mut model, 1);
+        assert_eq!(model.wide_stage(), crate::ui::tier::WideStage::Split);
+        let area = Rect::new(0, 0, 110, 30);
+        let task_area = model.responsive_geometry(area).task;
+        let hits = board_hit_map(area, &model);
+        let control = hits
+            .regions
+            .iter()
+            .find(|hit| {
+                task_area.contains(hit.area.as_position())
+                    && hit.target == crate::ui::render::QueueHitTarget::NavSort
+            })
+            .expect("the dim Split preview paints its sort control")
+            .area;
+        let click = click_at(control);
+        let (quit, intent) = board_mouse_click_intent_after_focus(
+            area,
+            &mut model,
+            &hits,
+            &mut ReflowRowClick::default(),
+            click,
+            |model, focus| {
+                assert_eq!(focus, BoardIntent::StageRight);
+                apply_intent(&mut domain, model, focus, None)?;
+                Ok::<bool, DomainError>(false)
+            },
+        )
+        .expect("route click");
+        assert!(!quit);
+        assert_eq!(model.wide_stage(), crate::ui::tier::WideStage::Rail);
+        let intent = intent.expect("the same click dispatches after the slide");
+        assert_eq!(intent, BoardIntent::OpenSortPicker);
+        let seat = mouse_intent_target_mut(&mut model, area, click, &hits, &intent);
+        apply_intent(&mut domain, seat, intent, None).expect("open sort picker");
+        assert_eq!(
+            model.right_seat().and_then(BoardModel::list_picker_kind),
+            Some(crate::ui::board::ListPickerKind::SortBy)
+        );
+        assert_eq!(model.list_picker_kind(), None, "the index keeps no picker");
+    }
+
+    #[test]
+    fn a_narrow_preview_header_drops_default_controls_before_a_chosen_group() {
+        let thread = "x".repeat(40);
+        let mut domain = DomainState::new();
+        domain
+            .create(
+                "threaded preview task",
+                None,
+                TaskScope::Project {
+                    path: "/repos/preview".into(),
+                },
+                ProvenanceOrigin::Manual,
+                Some(thread.clone()),
+            )
+            .expect("create");
+        let mut model = BoardModel::from_domain(&domain, None);
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::SelectNavTab(NavTab::Projects),
+            None,
+        )
+        .expect("projects");
+        stage_right(&mut domain, &mut model, 2);
+        let area = Rect::new(0, 0, 110, 30);
+        sync_frame_presentation(area, &model);
+        assert!(model.project_right_seat_focused());
+        let mut pick = |model: &mut BoardModel, open: BoardIntent, label: &str| {
+            apply_intent(&mut domain, model.input_target_mut(), open, None).expect("open");
+            let index = model
+                .right_seat()
+                .expect("preview seat")
+                .visible_list_picker_options()
+                .iter()
+                .position(|(_, option)| option.label.starts_with(label))
+                .unwrap_or_else(|| panic!("picker offers {label}"));
+            apply_intent(
+                &mut domain,
+                model.input_target_mut(),
+                BoardIntent::SelectListOption(index),
+                None,
+            )
+            .expect("pick");
+        };
+        pick(&mut model, BoardIntent::OpenGroupPicker, "thread");
+        pick(
+            &mut model,
+            BoardIntent::OpenThreadFilterPicker,
+            &format!("#{thread}"),
+        );
+        let hits = board_hit_map(area, &model);
+        let task_area = model.responsive_geometry(area).task;
+        let painted: Vec<_> = hits
+            .regions
+            .iter()
+            .filter(|hit| task_area.contains(hit.area.as_position()))
+            .map(|hit| hit.target)
+            .collect();
+        use crate::ui::render::QueueHitTarget::{NavChip, NavGroup, NavSort};
+        assert!(
+            painted.contains(&NavGroup) && painted.contains(&NavChip),
+            "the chosen group and the filter stay: {painted:?}"
+        );
+        assert!(
+            !painted.contains(&NavSort),
+            "the default sort drops first: {painted:?}"
+        );
+    }
+
+    #[test]
     fn projects_preview_keyboard_uses_right_seat_for_task_actions() {
         let (mut domain, mut model, id) = projects_preview_fixture();
         let area = Rect::new(0, 0, 110, 30);
@@ -6733,6 +6991,200 @@ mod tests {
         assert_eq!(model.reply_draft(), Some("two"));
     }
 
+    fn grouped_header_fixture(scope: TaskScope) -> (DomainState, BoardModel, uuid::Uuid) {
+        let mut domain = DomainState::new();
+        let mut row = None;
+        // The loose task leads (hottest group first) and its title wraps in the narrow
+        // Split preview but not in Rail, so the slide moves the `#ship` sub-header.
+        for (title, thread) in [
+            ("shipping task", Some("ship")),
+            (
+                "loose task whose title runs long enough to wrap only in the split preview",
+                None,
+            ),
+        ] {
+            let id = domain
+                .create(
+                    title,
+                    None,
+                    scope.clone(),
+                    ProvenanceOrigin::Manual,
+                    thread.map(str::to_string),
+                )
+                .expect("create grouped task");
+            domain
+                .set_status(id, HumanStatus::Started)
+                .expect("start grouped task");
+            row.get_or_insert(id);
+        }
+        let model = BoardModel::from_domain(&domain, None);
+        (domain, model, row.expect("row"))
+    }
+
+    /// Group `model` by thread and put its cursor on the `#ship` sub-header.
+    fn select_ship_header(domain: &mut DomainState, model: &mut BoardModel) -> uuid::Uuid {
+        apply_intent(domain, model, BoardIntent::OpenGroupPicker, None).expect("g");
+        let thread = model
+            .visible_list_picker_options()
+            .iter()
+            .position(|(_, option)| option.label == "thread")
+            .expect("thread grouping");
+        apply_intent(domain, model, BoardIntent::SelectListOption(thread), None).expect("pick");
+        let header = model
+            .queue_view()
+            .sections
+            .into_iter()
+            .flat_map(|section| section.groups)
+            .find(|group| group.label == "#ship")
+            .expect("#ship group")
+            .header_id;
+        let index = model
+            .visible_ids()
+            .iter()
+            .position(|id| *id == header)
+            .expect("an unfolded sub-header is selectable");
+        apply_intent(domain, model, BoardIntent::SelectIndex(index), None).expect("select");
+        assert!(model.group_header_selected());
+        header
+    }
+
+    #[test]
+    fn arrows_fold_a_header_in_place_and_otherwise_keep_their_slider_and_peek_meaning() {
+        let (mut domain, mut model, row) = grouped_header_fixture(TaskScope::Global);
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::SelectNavTab(NavTab::Desk),
+            None,
+        )
+        .expect("desk");
+        let header = select_ship_header(&mut domain, &mut model);
+        let wide = Rect::new(0, 0, 110, 24);
+        let single = Rect::new(0, 0, 109, 24);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let route = |model: &mut BoardModel, area, code| {
+            let mode = resolve_board_surface(area, model);
+            board_keyboard_intent_for_area(model, area, mode, key(code))
+        };
+
+        // Unfolded: ← / h fold at every width; → / l have nothing to do and keep their
+        // usual meaning (the slider wide, the peek narrow).
+        for area in [wide, single] {
+            assert_eq!(
+                route(&mut model, area, KeyCode::Left),
+                Some(BoardIntent::FoldHeader)
+            );
+            assert_eq!(
+                route(&mut model, area, KeyCode::Char('h')),
+                Some(BoardIntent::FoldHeader)
+            );
+        }
+        assert_eq!(
+            route(&mut model, wide, KeyCode::Right),
+            Some(BoardIntent::StageRight)
+        );
+        assert_eq!(
+            route(&mut model, single, KeyCode::Char('l')),
+            Some(BoardIntent::PeekDetail)
+        );
+
+        apply_intent(&mut domain, &mut model, BoardIntent::FoldHeader, None).expect("fold");
+        assert!(!model.visible_ids().contains(&row), "← folded the group");
+        assert_eq!(
+            model
+                .selected_index()
+                .map(|index| model.visible_ids()[index]),
+            Some(header),
+            "the cursor stays on the header"
+        );
+
+        // Folded: → / l unfold; ← / h fall through (inert at the slider's left end, the
+        // peek close narrow).
+        for area in [wide, single] {
+            assert_eq!(
+                route(&mut model, area, KeyCode::Right),
+                Some(BoardIntent::UnfoldHeader)
+            );
+            assert_eq!(
+                route(&mut model, area, KeyCode::Char('l')),
+                Some(BoardIntent::UnfoldHeader)
+            );
+        }
+        assert_eq!(route(&mut model, wide, KeyCode::Left), None);
+        assert_eq!(
+            route(&mut model, single, KeyCode::Char('h')),
+            Some(BoardIntent::CollapseDetail)
+        );
+        apply_intent(&mut domain, &mut model, BoardIntent::UnfoldHeader, None).expect("unfold");
+        assert!(model.visible_ids().contains(&row), "→ unfolded the group");
+
+        // Off a header the arrows never fold.
+        let index = model
+            .visible_ids()
+            .iter()
+            .position(|id| *id == row)
+            .expect("row");
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::SelectIndex(index),
+            None,
+        )
+        .expect("select row");
+        assert_eq!(
+            route(&mut model, single, KeyCode::Left),
+            Some(BoardIntent::CollapseDetail)
+        );
+    }
+
+    #[test]
+    fn enter_on_a_preview_thread_sub_header_opens_the_thread_view_on_the_outer_board() {
+        let area = Rect::new(0, 0, 110, 30);
+        let temp = TempStore::new("preview-thread-header");
+        let (mut domain, mut model, _) = grouped_header_fixture(TaskScope::Project {
+            path: "/repos/preview".into(),
+        });
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::SelectNavTab(NavTab::Projects),
+            None,
+        )
+        .expect("projects");
+        stage_right(&mut domain, &mut model, 2);
+        temp.store.save(&domain).expect("persist");
+        sync_frame_presentation(area, &model);
+        assert!(model.project_right_seat_focused());
+        select_ship_header(&mut domain, model.input_target_mut());
+
+        let intent = preview_key_intent(
+            &mut model,
+            area,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let RoutedBoardIntent { intent, target, .. } = route_board_intent(&model, intent);
+        assert_eq!(target, BoardIntentTarget::Focused);
+        let mut recovery = SaveRecovery::new();
+        let quit = dispatch_board_intent(
+            &temp.store,
+            &mut domain,
+            &mut model,
+            BoardDispatchRoute { area, target },
+            intent,
+            &mut recovery,
+            false,
+        )
+        .expect("dispatch Enter");
+        assert!(!quit);
+        assert_eq!(model.nav_tab(), NavTab::Projects);
+        assert_eq!(
+            model.projects_view(),
+            &crate::ui::board::ProjectsView::Thread("ship".into()),
+            "the preview's request reached the outer board"
+        );
+        assert!(model.right_seat().is_none(), "the preview closed");
+    }
+
     #[test]
     fn app_keyboard_route_owns_stage_slider_keys() {
         let (mut domain, mut model) = board_fixture("keyboard stage", None);
@@ -6897,6 +7349,334 @@ mod tests {
         if let Some(intent) = intent {
             apply_intent(domain, model, intent, None).expect("dispatch click");
         }
+    }
+
+    /// [`dispatch_reflow_test_click`], but the released click goes to the seat the app
+    /// would target, and a preview seat's outer request then reaches the outer board.
+    fn dispatch_preview_test_click(
+        domain: &mut DomainState,
+        model: &mut BoardModel,
+        reflow_click: &mut ReflowRowClick,
+        area: Rect,
+        click: MouseEvent,
+    ) {
+        reflow_click.observe(&Event::Mouse(click));
+        let hits = board_hit_map(area, model);
+        reflow_click.observe(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        }));
+        let (quit, intent) = board_mouse_click_intent_after_focus(
+            area,
+            model,
+            &hits,
+            reflow_click,
+            click,
+            |model, focus| {
+                apply_intent(domain, model, focus, None)?;
+                Ok::<bool, DomainError>(false)
+            },
+        )
+        .expect("route click through production focus handoff");
+        assert!(!quit);
+        if let Some(intent) = intent {
+            let target = mouse_intent_target(model, area, click, &hits, &intent);
+            apply_intent(domain, board_intent_target_mut(model, target), intent, None)
+                .expect("dispatch click");
+        }
+        if let Some(request) = model.take_outer_request() {
+            apply_intent(domain, model, request, None).expect("outer request");
+        }
+    }
+
+    /// A Projects preview at Split whose board is grouped by thread, and the `#ship`
+    /// sub-header's painted cell.
+    fn split_preview_ship_header(area: Rect) -> (DomainState, BoardModel, uuid::Uuid, MouseEvent) {
+        let (mut domain, mut model, _) = grouped_header_fixture(TaskScope::Project {
+            path: "/repos/preview".into(),
+        });
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::SelectNavTab(NavTab::Projects),
+            None,
+        )
+        .expect("projects");
+        stage_right(&mut domain, &mut model, 2);
+        let header = select_ship_header(&mut domain, model.input_target_mut());
+        apply_intent(&mut domain, &mut model, BoardIntent::StageLeft, None).expect("to Split");
+        assert_eq!(model.wide_stage(), crate::ui::tier::WideStage::Split);
+        assert!(model.right_seat().is_some(), "the preview stays at Split");
+        let hits = board_hit_map(area, &model);
+        let cell = hits
+            .regions
+            .iter()
+            .find(|hit| hit.target == crate::ui::render::QueueHitTarget::GroupHeader(header))
+            .expect("the preview paints the sub-header")
+            .area;
+        (domain, model, header, left_click(cell.x + 2, cell.y))
+    }
+
+    #[test]
+    fn a_real_double_click_on_a_sub_header_opens_or_folds_it_at_every_width() {
+        for width in [80, 120] {
+            for label in ["#ship", "no thread"] {
+                let area = Rect::new(0, 0, width, 30);
+                let (mut domain, mut model, _) = grouped_header_fixture(TaskScope::Global);
+                apply_intent(
+                    &mut domain,
+                    &mut model,
+                    BoardIntent::SelectNavTab(NavTab::Desk),
+                    None,
+                )
+                .expect("desk");
+                select_ship_header(&mut domain, &mut model);
+                let header = model
+                    .queue_view()
+                    .sections
+                    .into_iter()
+                    .flat_map(|section| section.groups)
+                    .find(|group| group.label == label)
+                    .expect("sub-header")
+                    .header_id;
+                let cell = board_hit_map(area, &model)
+                    .regions
+                    .iter()
+                    .find(|hit| {
+                        hit.target == crate::ui::render::QueueHitTarget::GroupHeader(header)
+                    })
+                    .expect("the board paints the sub-header")
+                    .area;
+                let click = left_click(cell.x + 2, cell.y);
+                let mut reflow = ReflowRowClick::default();
+                dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, click);
+                assert!(
+                    !model.layout().folded.contains(&header),
+                    "one click at {width} columns only selects {label}"
+                );
+                dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, click);
+                if label == "#ship" {
+                    assert_eq!(
+                        model.projects_view(),
+                        &crate::ui::board::ProjectsView::Thread("ship".into()),
+                        "a double-click at {width} columns opens the thread"
+                    );
+                } else {
+                    assert_eq!(model.nav_tab(), NavTab::Desk);
+                    assert!(
+                        model.layout().folded.contains(&header),
+                        "a double-click at {width} columns folds `no thread`"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The painted cell of `target` on the current frame, as a left press.
+    fn press_on(
+        area: Rect,
+        model: &BoardModel,
+        target: crate::ui::render::QueueHitTarget,
+    ) -> MouseEvent {
+        let cell = board_hit_map(area, model)
+            .regions
+            .iter()
+            .find(|hit| hit.target == target)
+            .unwrap_or_else(|| panic!("{target:?} is painted"))
+            .area;
+        left_click(cell.x + 2, cell.y)
+    }
+
+    /// Group `model`'s input seat by thread and return its `#ship` and `no thread` headers.
+    fn thread_headers(model: &BoardModel) -> (uuid::Uuid, uuid::Uuid) {
+        let groups: Vec<_> = model
+            .queue_view()
+            .sections
+            .into_iter()
+            .flat_map(|section| section.groups)
+            .collect();
+        let find = |label: &str| {
+            groups
+                .iter()
+                .find(|group| group.label == label)
+                .expect("sub-header")
+                .header_id
+        };
+        (find("#ship"), find("no thread"))
+    }
+
+    #[test]
+    fn a_press_elsewhere_another_header_or_the_window_disarms_a_header_double_click() {
+        use crate::ui::render::QueueHitTarget;
+        let area = Rect::new(0, 0, 80, 30);
+        for interruption in ["row", "header", "expiry"] {
+            let (mut domain, mut model, row) = grouped_header_fixture(TaskScope::Global);
+            apply_intent(
+                &mut domain,
+                &mut model,
+                BoardIntent::SelectNavTab(NavTab::Desk),
+                None,
+            )
+            .expect("desk");
+            select_ship_header(&mut domain, &mut model);
+            let (ship, loose) = thread_headers(&model);
+            let mut reflow = ReflowRowClick::default();
+            let on_ship = press_on(area, &model, QueueHitTarget::GroupHeader(ship));
+            dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, on_ship);
+            match interruption {
+                "row" => {
+                    let press = press_on(area, &model, QueueHitTarget::Task(row));
+                    dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, press);
+                }
+                "header" => {
+                    let press = press_on(area, &model, QueueHitTarget::GroupHeader(loose));
+                    dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, press);
+                }
+                _ => model.expire_header_double_clicks(),
+            }
+            let on_ship = press_on(area, &model, QueueHitTarget::GroupHeader(ship));
+            dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, on_ship);
+            assert_eq!(
+                (model.nav_tab(), model.projects_view()),
+                (NavTab::Desk, &crate::ui::board::ProjectsView::Overview),
+                "a {interruption} interruption leaves two single clicks"
+            );
+            assert!(model.group_header_selected());
+        }
+    }
+
+    #[test]
+    fn a_press_elsewhere_in_the_rail_preview_disarms_its_header_double_click() {
+        use crate::ui::render::QueueHitTarget;
+        let area = Rect::new(0, 0, 120, 30);
+        for interruption in ["row", "header", "expiry"] {
+            let (mut domain, mut model, row) = grouped_header_fixture(TaskScope::Project {
+                path: "/repos/preview".into(),
+            });
+            apply_intent(
+                &mut domain,
+                &mut model,
+                BoardIntent::SelectNavTab(NavTab::Projects),
+                None,
+            )
+            .expect("projects");
+            stage_right(&mut domain, &mut model, 2);
+            select_ship_header(&mut domain, model.input_target_mut());
+            assert_eq!(model.wide_stage(), crate::ui::tier::WideStage::Rail);
+            assert!(model.project_right_seat_focused());
+            let (ship, loose) = thread_headers(model.right_seat().expect("preview"));
+            let mut reflow = ReflowRowClick::default();
+            let on_ship = press_on(area, &model, QueueHitTarget::GroupHeader(ship));
+            dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, on_ship);
+            match interruption {
+                "row" => {
+                    let press = press_on(area, &model, QueueHitTarget::Task(row));
+                    dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, press);
+                }
+                "header" => {
+                    let press = press_on(area, &model, QueueHitTarget::GroupHeader(loose));
+                    dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, press);
+                }
+                _ => model.expire_header_double_clicks(),
+            }
+            let on_ship = press_on(area, &model, QueueHitTarget::GroupHeader(ship));
+            dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, on_ship);
+            assert_eq!(
+                model.projects_view(),
+                &crate::ui::board::ProjectsView::Overview,
+                "a {interruption} interruption in the preview leaves two single clicks"
+            );
+            let right = model.right_seat().expect("the preview stays open");
+            assert!(right.group_header_selected());
+        }
+    }
+
+    #[test]
+    fn a_split_preview_sub_header_double_click_survives_the_slide_and_opens_its_view() {
+        let area = Rect::new(0, 0, 120, 30);
+        let (mut domain, mut model, header, click) = split_preview_ship_header(area);
+        let mut reflow = ReflowRowClick::default();
+        dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, click);
+        assert_eq!(model.wide_stage(), crate::ui::tier::WideStage::Rail);
+        let moved = board_hit_map(area, &model)
+            .regions
+            .iter()
+            .find(|hit| hit.target == crate::ui::render::QueueHitTarget::GroupHeader(header))
+            .expect("the Rail preview paints the sub-header")
+            .area;
+        assert_ne!(moved.y, click.row, "the slide moved the sub-header");
+        let right = model.right_seat().expect("the preview stays open");
+        assert!(
+            !right.layout().folded.contains(&header) && right.group_header_selected(),
+            "the first click slid to Rail and only selected the sub-header"
+        );
+        dispatch_preview_test_click(&mut domain, &mut model, &mut reflow, area, click);
+        assert_eq!(
+            model.projects_view(),
+            &crate::ui::board::ProjectsView::Thread("ship".into()),
+            "the second click still names the sub-header the user saw"
+        );
+        assert!(model.right_seat().is_none());
+    }
+
+    #[test]
+    fn a_dirty_preview_refuses_a_sub_header_open_and_keeps_its_draft_and_fold() {
+        let area = Rect::new(0, 0, 120, 30);
+        let (mut domain, mut model, header, _) = split_preview_ship_header(area);
+        stage_right(&mut domain, &mut model, 1);
+        apply_intent(
+            &mut domain,
+            model.input_target_mut(),
+            BoardIntent::OpenCapture,
+            None,
+        )
+        .expect("open preview quick add");
+        apply_intent(
+            &mut domain,
+            model.input_target_mut(),
+            BoardIntent::QuickAddInsertText("keep this draft".into()),
+            None,
+        )
+        .expect("type preview draft");
+        let folded_before = model
+            .right_seat()
+            .map(|right| right.layout().folded.clone())
+            .expect("preview");
+
+        // A double-click: the second click asks the outer board, which refuses.
+        let temp = TempStore::new("dirty-preview-sub-header");
+        temp.store.save(&domain).expect("persist");
+        let mut recovery = SaveRecovery::new();
+        for _ in 0..2 {
+            dispatch_board_intent(
+                &temp.store,
+                &mut domain,
+                &mut model,
+                BoardDispatchRoute {
+                    area,
+                    target: BoardIntentTarget::Focused,
+                },
+                BoardIntent::ClickHeader(header),
+                &mut recovery,
+                false,
+            )
+            .expect("dispatch sub-header click");
+        }
+        assert_eq!(
+            model.message(),
+            Some("save or cancel edits before switching tasks")
+        );
+        assert_eq!(
+            model.projects_view(),
+            &crate::ui::board::ProjectsView::Overview
+        );
+        let right = model.right_seat().expect("the preview stays open");
+        assert_eq!(right.quick_add_title_value(), "keep this draft");
+        assert_eq!(
+            right.layout().folded,
+            folded_before,
+            "a refused open never falls back to folding"
+        );
     }
 
     #[test]

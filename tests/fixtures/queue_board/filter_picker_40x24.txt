@@ -2,7 +2,7 @@
 │                                        │
 │ desk  ·  tsk ▾  ·  projects            │
 │                                        │
-│                             #release ▾ │
+│     g:none ▾   s:recent ▾   #release ▾ │
 │                                        │
 │ ON DECK ─────────────────────────────2 │
 │                                        │

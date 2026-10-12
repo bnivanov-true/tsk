@@ -54,18 +54,21 @@ Press `Enter` to pin the query and return to board keys. Navigation, task action
 
 ## Threads and assignees filter
 
-A thread groups related tasks within a project, such as `release` or `login-fix`. An [assignee](#assign) names the agent a task is for. Both narrow a board through one picker with two tabs, `threads · @assignees`.
+A thread groups related tasks, such as `release` or `login-fix`. A thread name can span projects and the desk, so it also works as a cross-repo initiative. An [assignee](#assign) names the agent a task is for. On a project board both narrow it through one picker with two tabs, `threads · @assignees`.
 
 | Where | Action |
 | --- | --- |
+| Desk | Press `t` or click the filter to narrow by thread and project |
 | Project board | Press `t` or click the filter to open **Filter**; choose a thread, an assignee, or both |
 | Projects overview | Press `v` or click **Overview** to view one thread or one assignee across projects |
 
 On a project board the threads tab lists `all`, the project's threads, then **Without a thread**; the `@assignees` tab lists `all`, every profile in `config.toml` as `@name`, any name still on tasks whose profile was removed, then `unassigned`. The two choices combine: `#release` plus `@claude` shows only release tasks assigned to claude, and the filter control reads `#release @claude`. `all` clears only its own tab's choice, and `✓` marks the active choice in each tab. The choice is for this session only, clears when you switch projects, and search (`/`) narrows inside it.
 
+The desk filter has two tabs, **threads** and **projects**; press `Tab`, `←` or `→` (or click a tab) to switch. Each tab sets its own choice and the two combine, so `herdr-tsk #release` shows only that project's `release` tasks. The filter narrows every desk section, the done drawer included, and the control on the tab row names it (`all` when nothing is chosen). On a narrow desk with no filter, the `all` control is left off rather than taking a row of its own.
+
 On the Projects overview the threads tab offers **Overview** and each thread; the `@assignees` tab offers one `@name` view per assignee (there is no `unassigned` view). An `@name` view lists that assignee's tasks from every project and the desk, grouped by status like a thread view, with done tasks in the drawer. One view applies at a time.
 
-The picker opens on the threads tab (an `@name` overview view reopens on its own tab). `Tab` or a click switches tabs and clears the typed filter. Type to filter the current tab, use arrows to select, `Enter` to choose, and `Esc` to close without a change. `j` and `k` are search text in these selectors.
+The picker opens on the threads tab (an `@name` overview view reopens on its own tab). `Tab`, `←`/`→`, or a click switches tabs and clears the typed filter. Type to filter the current tab, use arrows to select, `Enter` to choose, and `Esc` to close without a change. `j` and `k` are search text in these selectors.
 
 Assign threads when [capturing](/docs/capture/#title-tokens) or [editing a task](/docs/task-page/#scope-thread-and-assignee).
 
@@ -77,7 +80,7 @@ Assign a task to an agent, dispatch it into its own Git worktree and Herdr works
 
 The assignee names one profile in `config.toml`. Press `@` on the board, peek, or task page, or choose **set assignee** in the palette, to open the assignee picker: every profile, then **none**. The current assignee is preselected, or the first profile when there is none. Type to filter, `↑`/`↓` to move, `Enter` to apply, and `Esc` to close without a change. With tasks marked, one choice assigns the whole set and one `ctrl+u` undoes it. With no profile defined, `@` says so and opens nothing. On the Projects overview `@` does nothing.
 
-You can also assign with `!a name` in [quick-add](/docs/capture/#title-tokens), the task page's [Assignee field](/docs/task-page/#scope-thread-and-assignee) or footer, or `tsk add --assignee` and `tsk edit --assignee`. Rows stay a title; the peek footer reads `@assignee · ⎇ <base> · #thread · project`, leaving out what is unset and a default base.
+You can also assign with `!a name` in [quick-add](/docs/capture/#title-tokens), the task page's [Assignee field](/docs/task-page/#scope-thread-and-assignee) or footer, or `tsk add --assignee` and `tsk edit --assignee`. Rows carry the `#thread · project` label after the title; the peek footer reads `@assignee · ⎇ <base> · #thread · project`, leaving out what is unset and a default base.
 
 ### Dispatch
 
@@ -239,6 +242,25 @@ When `gh` is installed and logged in, the cleanup card also looks up each task's
 
 On a marked set, `m` merges every listed task that has an open pull request into its base, one after another; one failure never stops the others. The tasks whose pull request merged, and those already merged, are marked done (one save, one undo step) and fully tidied. Every other task (its merge failed, no pull request, uncommitted changes, no dispatch) stays exactly as it was, and the finished card says why for each. From a script, use [`tsk status T12 done --merge`](/docs/cli/#status).
 
+## Group and sort
+
+Every task row carries a dim `#thread · project` label (`desk` for a desk task), at every width, including the narrow board rail beside an open task page. It follows the title two spaces after its last word; when it does not fit on the title's last line, it starts the next line at the title's indent and wraps like the title. Neither the title nor the label is ever truncated. A label leaves out what the view already says: a project board never names its own project, a thread filter drops the thread and a project filter the project, grouping drops its dimension inside the sections that actually group (the done drawer keeps it), and rows under **ON DECK · desk** never repeat `desk`. Archived rows carry the same label as done rows.
+
+| Key | Action |
+| --- | --- |
+| `g` | Group by: **none**, **project**, or **thread** (a project board offers none or thread; an `@name` view offers all three) |
+| `s` | Sort by: **recent**, **project**, **thread**, or **title** (a project board has no project sort) |
+| `f` | Fold or unfold the group the cursor is in: its sub-group, the inbox, or the archived group |
+| `Shift+F` | Fold every group in view, or unfold them all when all are folded |
+
+Grouping adds dim sub-headers such as `▾ herdr-tsk · 3`, `▾ #release · 2`, `▾ no thread · 1`, or `▾ desk · 1` inside **NEEDS YOU**, **IN MOTION**, **ON DECK**, and the **inbox**, whose sub-groups sit under its own fold. The section header keeps its total; each sub-header counts its own rows. Groups are ordered hottest first: the group whose newest row changed status most recently leads. The done drawer and the archived group never group, and grouping the desk by project leaves **ON DECK · desk** and its inbox alone because they only hold desk tasks.
+
+Sorting reorders rows inside each group, or inside each section while ungrouped (the inbox included). **recent** is each section's normal order; the others sort by project name (desk last), thread name (unthreaded last), or title, and ties keep the normal order. `N` notices still lead.
+
+Every task list's header shows `group: none ▾` and `sort: recent ▾` beside its filter (`all ▾`, a project, or a thread); click one to open its picker. The desk and project boards paint them on the tab row, the cross-project thread view beside its View control, and the wide Projects preview on its own header row beside the project name. When they do not fit, the pair shortens to `g:none ▾ s:recent ▾`. On narrow frames where even that does not fit beside the tabs, each control still at its default (`group: none`, `sort: recent`, the desk's unfiltered `all`) drops first, so a default never costs a row or pushes out a choice you made. If what you changed still does not fit, it moves to its own row under the tabs (the defaults rejoin it there when that row has room); `g`, `s`, and `t` work either way. The Projects preview has one header row, so there its name shortens first, then defaults drop, then changed controls from the left, the filter last. The Projects overview lists projects, not tasks, so it shows only its View control. A fresh board starts ungrouped and sorted by recent. The desk, project boards, and the cross-project thread view (which groups by project) each keep their own choice for the session, and the wide Projects preview keeps its own.
+
+Every sub-header is a cursor stop, open (`▾`) or folded (`▸`); a folded group shows only its sub-header. With the cursor on a sub-header, `←` or `h` folds it and `→` or `l` unfolds it, leaving the cursor on the header; when there is nothing to fold or unfold, the key keeps its usual meaning (the peek, or the wide stage slider). The inbox and archived headings fold the same way. `Enter` on a sub-header opens what it names: a project sub-header opens that project's board, `desk` opens the desk (on the desk itself it changes nothing), and a `#thread` sub-header opens that thread's cross-project view, as choosing it with `v` does. `no thread` opens nothing. With the cursor on a header, the status row offers `enter open` (when it opens something) and `← fold` or `→ unfold`. A click on any header (a sub-header, the inbox, or archived) only selects it. A double-click opens a sub-header like `Enter`; on a header that opens nothing (`no thread`, `desk` on the desk, the inbox, archived) it folds or unfolds the header instead. Otherwise fold with `←`/`→`, `f`, or `Shift+F`. `Shift+M` on a sub-header unfolds it and marks every task in that group as one set; inside multi-select it adds the group to the marked set. Folding, or changing the grouping, sorting, or filter, clears multi-select marks.
+
 ## Status
 
 | Section | Status |
@@ -323,7 +345,7 @@ tsk sends only to the agent it dispatched: the pane's live agent must carry the 
 
 The task stays started in every case and nothing relaunches or retries; the reply is on the task either way. `Shift+Enter` (save only) never sends by itself: what it saved goes out with the unblock or send-back that closes the block or round. The other starts are unchanged: a task never dispatched dispatches, and its prompt points the agent at the answers; a gone agent asks before [relaunching](#relaunch); an unassigned task unblocks to ready. If the save fails, nothing is sent until [save recovery](#save-failures) retries it.
 
-On your desk, **ON DECK** contains only desk tasks. On a project board, it contains that project's ready and open tasks. Ready tasks are the picked queue; open tasks are the untriaged inbox below it. Ready tasks sort by oldest pick first, open tasks by oldest capture first, and notice tasks lead within each group. The **inbox** group starts expanded; press `Enter` on its heading or `g` while the done drawer is closed to fold or unfold it. With the drawer open and archived tasks available, `g` addresses its archived group; otherwise it addresses the inbox. Use the thread and assignee filter to narrow the tasks.
+On your desk, **ON DECK** contains only desk tasks. On a project board, it contains that project's ready and open tasks. Ready tasks are the picked queue; open tasks are the untriaged inbox below it. Ready tasks sort by oldest pick first, open tasks by oldest capture first, and notice tasks lead within each group. The **inbox** group starts expanded; press `←` or `h` on its heading to fold it and `→` or `l` to unfold it, or `f` with the cursor inside it (when the inbox is grouped, `f` folds the cursor's sub-group instead). Use the filter to narrow the tasks, and [group and sort](#group-and-sort) to arrange them.
 
 Sections hold their order while you work: NEEDS YOU, IN MOTION, DONE, and the drawer's ARCHIVED group keep the most recent status change on top, while ON DECK lists ready and inbox backlogs oldest first. (`N` tasks lead each group until you clear them.) Editing a task or ticking a step never moves it; setting a status moves it to the top of its new section.
 
@@ -368,6 +390,10 @@ Your first board open seeds four desk tasks with `N` ids (not `T`). They teach t
 | Action | Result |
 | --- | --- |
 | Click a tab or selector | Change view or open its choices |
+| Click the `group: …` or `sort: …` control | Open group by or sort by |
+| Click a group sub-header, the inbox, or archived | Select it |
+| Double-click a group sub-header | Open its project's board, the desk, or its thread's view |
+| Double-click a header that opens nothing (`no thread`, `desk` on the desk, the inbox, archived) | Fold or unfold it |
 | Click a task outside multi-select | Peek in narrow panes; open or update details beside the board in wide panes |
 | Click a task or its `T`/`N` number in multi-select | Move the cursor there and toggle its mark |
 | Click the same task again in a narrow pane | Close its peek |
@@ -377,7 +403,7 @@ Your first board open seeds four desk tasks with `N` ids (not `T`). They teach t
 | Wheel or drag a scrollbar | Scroll |
 | Drag across text | Select and copy on release |
 
-Open peeks show notes, followed by one metadata footer ordered `@assignee · ⎇ <base> · #thread · project`, omitting unset parts and hiding the default base. A task with [after](#after) links lists them above the notes. A blocked or review task's peek shows its [live line and block or review](#status) instead of the notes. Below 110 columns, `→` or `l` opens a peek and `←` or `h` closes it. Peeks show up to five wrapped note lines; the [task page](/docs/task-page/) shows the rest.
+Open peeks show notes, followed by one metadata footer ordered `@assignee · ⎇ <base> · #thread · project`, omitting unset parts, the default base, and whatever the view already says (a project board's own project, a filtered thread, a grouped dimension). A peeked row moves its label into that footer, so it never paints twice. A task with [after](#after) links lists them above the notes. A blocked or review task's peek shows its [live line and block or review](#status) instead of the notes. Below 110 columns, `→` or `l` opens a peek and `←` or `h` closes it. Peeks show up to five wrapped note lines; the [task page](/docs/task-page/) shows the rest.
 
 ## Wide stage slider
 
@@ -406,7 +432,7 @@ Narrowing the pane shows one surface; widening it restores the selected view. Ea
 
 Press `d` to open or close the done drawer. Select a done task and press `ctrl+n` to return it to ready, or `ctrl+o` to send it to the inbox.
 
-The drawer's **archived** group starts closed. Click its heading or press `Enter` on it to expand. `g` folds or unfolds the group while the drawer is open.
+The drawer's **archived** group starts closed. Press `→` or `l` on its heading (or double-click it) to expand, and `←` or `h` to close it. `f` with the cursor inside it folds it again; `Shift+F` folds or unfolds it with every other group.
 
 ## Archive
 
@@ -458,7 +484,7 @@ Press `:` on the board or a task page and type to find an action. Use arrows or 
 
 | Available actions | When |
 | --- | --- |
-| New task, undo, done drawer, help, quit | Always |
+| New task, undo, done drawer, group by…, sort by…, fold / unfold group, help, quit | Always |
 | Set open/ready/started/blocked/review, edit notes, change scope, delete | A task is selected |
 | Set assignee, set base, set after… | A task is selected |
 | Dispatch again | A task with a dispatch record is selected |
@@ -468,7 +494,7 @@ Press `:` on the board or a task page and type to find an action. Use arrows or 
 
 **Set assignee** opens the same picker as `@`; **set base** opens the branch picker; **set after…** opens the [task picker](#after). Each applies to the marked set when marks are present, with one save and one undo. **Chain in order** makes each marked task run after the one marked before it. **Set status: started** takes the same route as `ctrl+s`, including on blocked and review tasks: an assigned task dispatches, and with marks the [start card](#start-a-marked-set) opens. **Dispatch again** ignores and clears marks, then relaunches only the cursor.
 
-Search matches letters in order: `ssr` finds `set status: review`.
+Group by…, sort by…, and fold / unfold group act on the task list, so they are left out on the projects overview and over an open task page. Search matches letters in order: `ssr` finds `set status: review`.
 
 ## Help
 

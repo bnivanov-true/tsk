@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::capture::CaptureField;
 use super::edit::{escaped_line_window, place_edit_cursor, place_edit_cursor_at, EditBuffer};
 use super::present_line;
-use super::queue::{NavTab, ProjectRow, QueueSection, QueueView, SectionKind};
+use super::queue::{GroupBy, NavTab, ProjectRow, QueueSection, QueueView, SectionKind};
 use super::scrollbar;
 use super::tier::{Tier, TierGeometry};
 use crate::domain::{HumanStatus, Task, TaskScope};
@@ -131,6 +131,21 @@ pub fn paint_task_row_lines(
     leading_indent: usize,
     live_gutter: bool,
 ) -> Vec<TaskRowLine> {
+    paint_labelled_task_row_lines(row, geo, leading_indent, live_gutter, None)
+}
+
+/// [`paint_task_row_lines`] with an optional dim `#thread · project` label, painted at
+/// every width and never truncated. It flows two cells after the title's last word on
+/// the title's last line, or starts the next line at the title's indent when it does not
+/// fit there, wrapping like the title. `live_gutter` as for [`paint_task_row_lines`]: every
+/// continuation, label lines included, carries the dim `│`.
+pub fn paint_labelled_task_row_lines(
+    row: &TaskRowPaint<'_>,
+    geo: &TierGeometry,
+    leading_indent: usize,
+    live_gutter: bool,
+    label: Option<&str>,
+) -> Vec<TaskRowLine> {
     let row_w = geo.row_width.saturating_sub(2) as usize;
     let title_budget = row_w;
     let glyph_cells = display_width(&super::terminal_text(row.glyph));
@@ -139,6 +154,10 @@ pub fn paint_task_row_lines(
     let identifier_gap = usize::from(identifier_width > 0);
     let title_x = prefix_cells.saturating_add(identifier_width + identifier_gap);
     let room = title_budget.saturating_sub(title_x).max(1);
+    let label = label
+        .map(|label| present_line(label, usize::MAX))
+        .filter(|label| !label.is_empty());
+    let label_w = label.as_deref().map(display_width).unwrap_or(0);
     let head_content_x = u16::try_from(prefix_cells).unwrap_or(u16::MAX);
     let head_content_width = u16::try_from(identifier_width + identifier_gap + room)
         .unwrap_or(u16::MAX)
@@ -156,7 +175,7 @@ pub fn paint_task_row_lines(
         .map(|wrapped| wrapped.text)
         .collect();
 
-    let mut lines = Vec::with_capacity(segments.len());
+    let mut lines = Vec::with_capacity(segments.len() + 1);
     let head = TaskRowPaint {
         title: &segments[0],
         ..*row
@@ -164,7 +183,7 @@ pub fn paint_task_row_lines(
     let mut title_geo = *geo;
     title_geo.row_width = row_w as u16;
     lines.push(TaskRowLine {
-        line: paint_task_row_with_indent(&head, &title_geo, leading_indent),
+        line: paint_task_row_with_indent(&head, &title_geo, leading_indent, None),
         content_x: head_content_x,
         content_width: head_content_width,
         identifier,
@@ -192,6 +211,47 @@ pub fn paint_task_row_lines(
                 format!("{indent}{segment}"),
                 continuation_style,
             )),
+        };
+        lines.push(TaskRowLine {
+            line: bound_line(line, row_w),
+            content_x: title_content_x,
+            content_width: title_content_width,
+            identifier: None,
+        });
+    }
+    let Some(label) = label else {
+        return lines;
+    };
+    let last_w = segments.last().map(|text| display_width(text)).unwrap_or(0);
+    let parts: Vec<String> = if label_w + 2 + last_w <= room {
+        if let Some(last) = lines.last_mut() {
+            let mut spans = last.line.spans.clone();
+            // Drop the head line's right-edge leader so the label sits right
+            // after the title instead of overflowing the row.
+            while spans
+                .last()
+                .is_some_and(|span| span.content.trim().is_empty())
+            {
+                spans.pop();
+            }
+            spans.push(Span::styled(format!("  {label}"), style_dim()));
+            last.line = bound_line(Line::from(spans), row_w);
+        }
+        Vec::new()
+    } else {
+        crate::ui::edit::wrap_text(&label, room)
+            .into_iter()
+            .map(|part| part.text)
+            .collect()
+    };
+    for part in parts {
+        let line = match &gutter {
+            Some(pad) => Line::from(vec![
+                Span::styled(LIVE_GUTTER_INDENT, style_plain()),
+                Span::styled("│", style_dim()),
+                Span::styled(format!("{pad}{part}"), style_dim()),
+            ]),
+            None => Line::from(Span::styled(format!("{indent}{part}"), style_dim())),
         };
         lines.push(TaskRowLine {
             line: bound_line(line, row_w),
@@ -367,6 +427,7 @@ fn paint_task_row_with_indent(
     row: &TaskRowPaint<'_>,
     geo: &TierGeometry,
     leading_indent: usize,
+    label: Option<&str>,
 ) -> Line<'static> {
     let row_w = geo.row_width as usize;
     let title_budget = row_w;
@@ -391,7 +452,11 @@ fn paint_task_row_with_indent(
         .saturating_add(display_width(identifier_gap))
         .saturating_add(display_width(&title));
 
-    let leader = " ".repeat(row_w.saturating_sub(left_w));
+    let label = label
+        .map(|label| present_line(label, row_w))
+        .filter(|label| !label.is_empty() && left_w + 2 + display_width(label) <= row_w);
+    let label_w = label.as_deref().map(display_width).unwrap_or(0);
+    let leader = " ".repeat(row_w.saturating_sub(left_w).saturating_sub(label_w));
 
     let (title_style, identifier_style, leader_style) = if row.dim {
         (style_dim(), style_dim(), style_dim())
@@ -416,6 +481,9 @@ fn paint_task_row_with_indent(
     spans.push(Span::styled(title, title_style));
     if !leader.is_empty() {
         spans.push(Span::styled(leader, leader_style));
+    }
+    if let Some(label) = label {
+        spans.push(Span::styled(label, style_dim()));
     }
     bound_line(Line::from(spans), row_w)
 }
@@ -768,6 +836,10 @@ pub struct QueueFrameModel<'a> {
     pub nav: NavPaint,
     /// Which board surface the list paints (section titles and row attribution).
     pub surface: BoardSurface,
+    /// Paint `#thread` in row labels (the surface, filter, or grouping does not already say it).
+    pub thread_labels: bool,
+    /// Paint the project in row labels (the surface, filter, or grouping does not already say it).
+    pub show_project_meta: bool,
     /// The projects index rows (Projects surface, Overview view). When `projects_index`
     /// is set the list paints these instead of task sections.
     pub projects: &'a [ProjectRow],
@@ -825,6 +897,8 @@ pub struct QueueFrameModel<'a> {
     pub inbox_header_selected: bool,
     /// Every task row paints dim: the read-only archived focus (AC-41).
     pub rows_dim: bool,
+    /// Sub-header ids of folded groups (session-only).
+    pub folded_groups: BTreeSet<Uuid>,
 }
 
 /// Persistent navigation row paint: three fixed tabs plus the destination control.
@@ -839,6 +913,28 @@ pub struct NavPaint {
     pub slot2_project: bool,
     /// Right-side control of the active destination.
     pub chip: Option<NavChipPaint>,
+    /// The group and sort controls, beside the chip; `None` on the projects index, which
+    /// lists projects, not tasks.
+    pub layout: Option<LayoutPaint>,
+}
+
+/// The current group and sort words the header's two layout controls paint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutPaint {
+    pub group: &'static str,
+    pub sort: &'static str,
+}
+
+impl LayoutPaint {
+    /// Ungrouped: a fresh board's grouping.
+    pub fn group_is_default(&self) -> bool {
+        self.group == "none"
+    }
+
+    /// Recent order: a fresh board's sort.
+    pub fn sort_is_default(&self) -> bool {
+        self.sort == "recent"
+    }
 }
 
 /// The right-side destination control: the project board's thread filter, or the
@@ -847,6 +943,9 @@ pub struct NavPaint {
 pub struct NavChipPaint {
     pub label: String,
     pub kind: NavChipKind,
+    /// An idle control (the unfiltered desk's `all ▾`): dropped rather than given its own
+    /// row when the header's controls do not fit beside the tabs.
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -873,8 +972,12 @@ pub enum PickerTabsPaint {
         archived_active: bool,
         archived_count: usize,
     },
-    /// The Filter / View list picker's `threads · @assignees` tabs.
-    Filter { assignees_active: bool },
+    /// A tabbed list picker: `threads` first, then `second` (the project Filter / View
+    /// picker's `@assignees`, or the desk filter's `projects`).
+    Filter {
+        second: crate::ui::board::FilterTab,
+        second_active: bool,
+    },
 }
 
 /// Logical control under a painted rectangle (rebuilt every frame).
@@ -901,10 +1004,19 @@ pub enum QueueHitTarget {
     ///
     /// [`BoardIntent::ToggleDoneDrawer`]: crate::ui::input::BoardIntent::ToggleDoneDrawer
     Drawer,
-    /// The done drawer's archived group header: selects the row and toggles the group.
+    /// The done drawer's archived group header: a click selects it, a double-click folds or
+    /// unfolds the group.
     ArchivedHeader,
-    /// The ON DECK inbox group header: selects the row and toggles the group.
+    /// The ON DECK inbox group header: a click selects it, a double-click folds or unfolds
+    /// the group.
     InboxHeader,
+    /// A group sub-header inside a status section (its chrome row id): a click selects it,
+    /// a double-click opens its board, or folds it when it opens nothing.
+    GroupHeader(Uuid),
+    /// The header's `group: …` control: opens the group picker.
+    NavGroup,
+    /// The header's `sort: …` control: opens the sort picker.
+    NavSort,
     /// One painted row of the open palette, indexed exactly as
     /// `BoardModel::visible_commands()` orders them, so a click resolves straight to that
     /// command's own intent ( residual: mapped through the model's command list, never
@@ -1176,25 +1288,46 @@ pub fn draw_project_preview_frame(
     )
 }
 
+/// The preview column's one header row: the project name, then the same group, sort and
+/// thread filter controls as a project board's selector row, right-aligned. The name
+/// yields room first (down to a short stub); then controls at their defaults drop, and
+/// only after them non-default ones from the left, the filter last.
 fn paint_project_preview_header(
     frame: &mut Frame<'_>,
+    model: &QueueFrameModel<'_>,
     geo: &TierGeometry,
     surface: Rect,
     project_name: &str,
     bold: bool,
+    hits: &mut QueueHitMap,
 ) {
+    const NAME_FLOOR: usize = 8;
     let Some(row) = geo.selector_row else {
         return;
     };
-    let text = format!(" {project_name}");
+    let width = geo.row_width as usize;
+    let name = format!(" {project_name} ");
+    let room = width.saturating_sub(display_width(&name).min(NAME_FLOOR + 2));
+    let controls = fitted_controls(model, room);
+    let name_room = width
+        .saturating_sub(controls_width(&controls))
+        .max(NAME_FLOOR.min(width));
+    let shown = present_line(&name, name_room);
     let style = if bold { style_bold() } else { style_dim() };
+    let left_width = display_width(&shown);
+    let mut spans = vec![Span::styled(shown, style)];
+    let mut regions = Vec::new();
+    push_selector_controls(&mut spans, &mut regions, controls, left_width, width);
     put_line(
         frame,
         surface,
         row,
         geo.row_width,
-        paint_bounded_line(&text, geo.row_width, style),
+        bound_line(Line::from(spans), width),
     );
+    for (target, x, w) in regions {
+        hits.push(target, Rect::new(x, row, w, 1));
+    }
 }
 
 /// Paint the stage G rail: the board list at rail width (the done drawer and archived fold
@@ -1557,7 +1690,7 @@ fn draw_queue_frame_impl(
                 }
                 if selector_chip_wraps(model, width) {
                     let limit = geo.viewport_top.min(geo.rule_row.unwrap_or(geo.height));
-                    for (index, (chip, x, chip_width)) in
+                    for (index, (chip, regions)) in
                         paint_selector_chip(model, width).into_iter().enumerate()
                     {
                         let chip_row = row.saturating_add(2 + index as u16);
@@ -1565,10 +1698,9 @@ fn draw_queue_frame_impl(
                             break;
                         }
                         put_line(frame, surface, chip_row, width, chip);
-                        hits.push(
-                            QueueHitTarget::NavChip,
-                            Rect::new(x, chip_row, chip_width, 1),
-                        );
+                        for (target, x, w) in regions {
+                            hits.push(target, Rect::new(x, chip_row, w, 1));
+                        }
                     }
                 }
             }
@@ -1722,7 +1854,7 @@ fn draw_queue_frame_impl(
     }
 
     if let Some((project_name, bold)) = project_header {
-        paint_project_preview_header(frame, geo, surface, project_name, bold);
+        paint_project_preview_header(frame, model, geo, surface, project_name, bold, &mut hits);
     }
 
     paint_overlay(frame, &model.overlay, geo, surface, &mut hits);
@@ -2770,6 +2902,21 @@ const FILTER_PICKER_FOOTER_COMPACT: &[VerbEntry<'static>] = &[
     VerbEntry {
         key: "tab",
         label: "switch",
+    },
+    VerbEntry {
+        key: "esc",
+        label: "close",
+    },
+];
+/// The desk filter's tabbed picker: arrows flip tabs, the rest is the list contract.
+const FILTER_FOOTER: &[VerbEntry<'static>] = &[
+    VerbEntry {
+        key: "←→",
+        label: "tab",
+    },
+    VerbEntry {
+        key: "enter",
+        label: "choose",
     },
     VerbEntry {
         key: "esc",
@@ -4678,6 +4825,10 @@ fn paint_scope_dropdown(
                 0
             },
             legend: match tabs {
+                Some(PickerTabsPaint::Filter {
+                    second: crate::ui::board::FilterTab::Projects,
+                    ..
+                }) => FILTER_FOOTER,
                 Some(PickerTabsPaint::Filter { .. }) if legend_fits(geo, FILTER_PICKER_FOOTER) => {
                     FILTER_PICKER_FOOTER
                 }
@@ -4715,12 +4866,18 @@ fn paint_scope_dropdown(
                 QueueHitTarget::PickerTab(crate::ui::board::PickerTab::Main),
                 QueueHitTarget::PickerTab(crate::ui::board::PickerTab::Archived),
             ),
-            PickerTabsPaint::Filter { assignees_active } => (
+            PickerTabsPaint::Filter {
+                second,
+                second_active,
+            } => (
                 " threads ".to_string(),
-                " @assignees ".to_string(),
-                assignees_active,
+                match second {
+                    crate::ui::board::FilterTab::Projects => " projects ".to_string(),
+                    _ => " @assignees ".to_string(),
+                },
+                second_active,
                 QueueHitTarget::ListPickerTab(crate::ui::board::FilterTab::Threads),
-                QueueHitTarget::ListPickerTab(crate::ui::board::FilterTab::Assignees),
+                QueueHitTarget::ListPickerTab(second),
             ),
         };
         let left_w = display_width(&left) as u16;
@@ -4820,6 +4977,12 @@ enum ListRow {
     },
     /// The ON DECK inbox group header (sticky, selectable, hits map to the toggle).
     InboxHeader {
+        line: Line<'static>,
+    },
+    /// A group sub-header inside a status section (always selectable; a click selects it, a
+    /// double-click opens its board or folds it).
+    GroupHeader {
+        id: Uuid,
         line: Line<'static>,
     },
     /// One selectable projects index row (navigation, never a task). The selected
@@ -4946,6 +5109,15 @@ fn paint_list_row(
             if base_list_interactive {
                 hits.push(
                     QueueHitTarget::InboxHeader,
+                    Rect::new(0, y, content_width, 1),
+                );
+            }
+        }
+        ListRow::GroupHeader { id, line } => {
+            put_line(frame, surface, y, content_width, line.clone());
+            if base_list_interactive {
+                hits.push(
+                    QueueHitTarget::GroupHeader(*id),
                     Rect::new(0, y, content_width, 1),
                 );
             }
@@ -5288,15 +5460,23 @@ fn build_list_rows_inner(
                      out: &mut Vec<ListRow>,
                      selected_idx: &mut Option<usize>,
                      anchor_last_idx: &mut Option<usize>,
-                     dim: bool| {
+                     thread_label: bool,
+                     dim: bool,
+                     project_label: bool| {
         let Some(task) = model.tasks.iter().find(|task| task.id == id) else {
             // Stale ids may outlive a snapshot refresh. Skip them without inventing a row.
             return;
         };
-        // Row metadata (assignee, thread, project) lives in the peek only; the row itself
-        // stays a title so the list reads as a list. The peek always names assignee,
-        // thread and project when set, whatever the lens.
-        let peek_meta = row_meta(task, model.now, true, true);
+        // The row's `#thread · project` label, painted after the title or, when the row
+        // is peeked, on the peek's closing line instead, so it never paints twice. That
+        // closing line also names the assignee and base, whatever the lens.
+        let meta = row_label(task, model.thread_labels && thread_label, project_label);
+        let peek_meta = fit_row_meta(
+            task.assignee.as_deref().map(|name| format!("@{name}")),
+            task.base.as_deref().map(|name| format!("⎇ {name}")),
+            None,
+            Some(meta.clone()),
+        );
         let selected = model.selection_id == Some(task.id)
             && !matches!(model.overlay, QueueOverlay::ScopeDropdown { .. });
         let marked = model.marked_ids.contains(&task.id);
@@ -5308,6 +5488,7 @@ fn build_list_rows_inner(
         let live_text = (!rail && detail_target != Some(task.id))
             .then(|| live_line(task, model.tasks, model.now))
             .flatten();
+        let label = (detail_target != Some(task.id) && !meta.is_empty()).then_some(meta.as_str());
         let lines = if rail {
             paint_rail_row_lines(
                 task,
@@ -5316,9 +5497,10 @@ fn build_list_rows_inner(
                 marked,
                 geo.row_width,
                 0,
+                label,
             )
         } else {
-            paint_task_row_lines(
+            paint_labelled_task_row_lines(
                 &TaskRowPaint {
                     glyph: task_status_glyph(task),
                     identifier: identifier.as_deref(),
@@ -5334,6 +5516,7 @@ fn build_list_rows_inner(
                 // Whatever hangs under the row at the `└` column, its live line or its open
                 // peek, joins the wrapped title through the gutter.
                 live_text.is_some() || detail_target == Some(task.id),
+                label,
             )
         };
         let live = live_text
@@ -5396,6 +5579,47 @@ fn build_list_rows_inner(
                 });
             }
             *anchor_last_idx = Some(out.len() - 1);
+        }
+    };
+    // A grouped section's (or the inbox's) sub-headers, each followed by its rows unless
+    // folded.
+    let push_groups = |section: &QueueSection,
+                       out: &mut Vec<ListRow>,
+                       selected_idx: &mut Option<usize>,
+                       anchor_last_idx: &mut Option<usize>,
+                       thread_label: bool,
+                       project_label: bool| {
+        for group in &section.groups {
+            let folded = model.folded_groups.contains(&group.header_id);
+            let header_selected = model.selection_id == Some(group.header_id);
+            out.push(ListRow::GroupHeader {
+                id: group.header_id,
+                line: paint_group_header(
+                    &group.label,
+                    group.task_ids.len(),
+                    geo.row_width,
+                    header_selected,
+                    folded,
+                    true,
+                ),
+            });
+            if header_selected {
+                *selected_idx = Some(out.len() - 1);
+            }
+            if folded {
+                continue;
+            }
+            for id in group.task_ids.iter().copied() {
+                push_task(
+                    id,
+                    out,
+                    selected_idx,
+                    anchor_last_idx,
+                    thread_label,
+                    false,
+                    project_label,
+                );
+            }
         }
     };
 
@@ -5466,7 +5690,16 @@ fn build_list_rows_inner(
                 continue;
             }
             for id in section.task_ids.iter().copied() {
-                push_task(id, &mut out, &mut selected_idx, &mut anchor_last_idx, true);
+                // Archived rows paint dim but carry the same label as drawer rows.
+                push_task(
+                    id,
+                    &mut out,
+                    &mut selected_idx,
+                    &mut anchor_last_idx,
+                    true,
+                    true,
+                    model.show_project_meta,
+                );
             }
             continue;
         }
@@ -5490,8 +5723,34 @@ fn build_list_rows_inner(
             if model.inbox_collapsed {
                 continue;
             }
+            let grouped = !section.groups.is_empty();
+            let thread_label =
+                model.thread_labels && !(grouped && model.view.group == GroupBy::Thread);
+            // Every desk inbox row is a desk task; its section already says so.
+            let inbox_project_label = model.show_project_meta
+                && model.surface != BoardSurface::Desk
+                && !(grouped && model.view.group == GroupBy::Project);
+            if grouped {
+                push_groups(
+                    section,
+                    &mut out,
+                    &mut selected_idx,
+                    &mut anchor_last_idx,
+                    thread_label,
+                    inbox_project_label,
+                );
+                continue;
+            }
             for id in section.task_ids.iter().copied() {
-                push_task(id, &mut out, &mut selected_idx, &mut anchor_last_idx, false);
+                push_task(
+                    id,
+                    &mut out,
+                    &mut selected_idx,
+                    &mut anchor_last_idx,
+                    thread_label,
+                    false,
+                    inbox_project_label,
+                );
             }
             continue;
         }
@@ -5509,8 +5768,37 @@ fn build_list_rows_inner(
             out.push(ListRow::Hint(paint_empty_hint(geo.row_width)));
             continue;
         }
+        // Row labels omit whatever the surface, its filter, or its grouping already says
+        // (the frame model's two dimension flags).
+        // A section that actually groups drops its grouped dimension; ungrouped sections
+        // (the done drawer) keep it.
+        let grouped = !section.groups.is_empty();
+        let thread_label = model.thread_labels && !(grouped && model.view.group == GroupBy::Thread);
+        // `ON DECK · desk` already names its rows' scope.
+        let section_project_label = model.show_project_meta
+            && !(grouped && model.view.group == GroupBy::Project)
+            && !(model.surface == BoardSurface::Desk && section.kind == SectionKind::OnDeck);
+        if grouped {
+            push_groups(
+                section,
+                &mut out,
+                &mut selected_idx,
+                &mut anchor_last_idx,
+                thread_label,
+                section_project_label,
+            );
+            continue;
+        }
         for id in section.task_ids.iter().copied() {
-            push_task(id, &mut out, &mut selected_idx, &mut anchor_last_idx, false);
+            push_task(
+                id,
+                &mut out,
+                &mut selected_idx,
+                &mut anchor_last_idx,
+                thread_label,
+                false,
+                section_project_label,
+            );
         }
     }
     (out, anchor_last_idx, selected_idx, reply_caret.get())
@@ -5781,6 +6069,7 @@ fn paint_rail_row_lines(
     marked: bool,
     row_width: u16,
     leading_indent: usize,
+    label: Option<&str>,
 ) -> Vec<TaskRowLine> {
     let row_w = row_width as usize;
     let marker = match (selected, marked) {
@@ -5801,11 +6090,11 @@ fn paint_rail_row_lines(
         .saturating_sub(1)
         .saturating_sub(continuation_indent)
         .max(1);
-    let segments: Vec<String> =
-        crate::ui::edit::wrap_text(&task.title, room.min(continuation_room))
-            .into_iter()
-            .map(|wrapped| wrapped.text)
-            .collect();
+    let wrap_room = room.min(continuation_room);
+    let segments: Vec<String> = crate::ui::edit::wrap_text(&task.title, wrap_room)
+        .into_iter()
+        .map(|wrapped| wrapped.text)
+        .collect();
     let mut lines = Vec::with_capacity(segments.len());
     let mut spans = vec![Span::styled(prefix, style_dim())];
     if let Some(identifier) = identifier {
@@ -5843,6 +6132,37 @@ fn paint_rail_row_lines(
             identifier: None,
         });
     }
+    // The row label flows after the title exactly as on a full-width row.
+    let Some(label) = label
+        .map(|label| present_line(label, usize::MAX))
+        .filter(|label| !label.is_empty())
+    else {
+        return lines;
+    };
+    let last_w = segments.last().map(|text| display_width(text)).unwrap_or(0);
+    if last_w + 2 + display_width(&label) <= wrap_room {
+        if let Some(last) = lines.last_mut() {
+            let mut spans = last.line.spans.clone();
+            spans.push(Span::styled(format!("  {label}"), style_dim()));
+            last.line = bound_line(Line::from(spans), row_w);
+        }
+        return lines;
+    }
+    for part in crate::ui::edit::wrap_text(&label, wrap_room) {
+        let cells = display_width(&part.text);
+        lines.push(TaskRowLine {
+            line: bound_line(
+                Line::from(Span::styled(
+                    format!("{}{}", " ".repeat(continuation_indent), part.text),
+                    style_dim(),
+                )),
+                row_w,
+            ),
+            content_x: u16::try_from(continuation_indent).unwrap_or(u16::MAX),
+            content_width: u16::try_from(cells).unwrap_or(u16::MAX).max(1),
+            identifier: None,
+        });
+    }
     lines
 }
 
@@ -5852,7 +6172,7 @@ fn paint_rail_row_lines(
 /// A collapsible group header: `{chevron} {word} · {n}` with no rule. Selected,
 /// the word is bold and the rest dim; unselected, everything is dim. Never reverse.
 fn paint_group_header(
-    word: &'static str,
+    word: &str,
     count: usize,
     width: u16,
     selected: bool,
@@ -6228,17 +6548,130 @@ fn selector_tab_texts(model: &QueueFrameModel<'_>, width: usize) -> [(NavTab, St
 /// Whether the destination control needs a dedicated row to keep tabs and its selected
 /// value readable without overlap, especially at the 40-column operating floor.
 fn selector_chip_wraps(model: &QueueFrameModel<'_>, width: u16) -> bool {
-    let Some(chip) = model.nav.chip.as_ref() else {
-        return false;
-    };
-    let tabs = selector_tab_texts(model, width as usize);
-    let tabs_width = tabs
+    let controls = selector_controls(model, width);
+    !controls.is_empty()
+        && selector_tabs_width(model, width) + controls_width(&controls) > width as usize
+}
+
+fn selector_tabs_width(model: &QueueFrameModel<'_>, width: u16) -> usize {
+    selector_tab_texts(model, width as usize)
         .iter()
         .map(|(_, tab)| display_width(tab))
         .sum::<usize>()
-        + 6;
-    let chip_width = display_width(&format!(" {} ▾ ", chip.label));
-    tabs_width.saturating_add(chip_width) > width as usize
+        + 6
+}
+
+/// The header's controls, left to right: group, sort, and the destination chip (filter or
+/// View). `compact` spells the layout pair by key (`g:thread ▾ s:recent ▾`). `idle` keeps
+/// each control sitting at its own default (`group: none`, `sort: recent`, the unfiltered
+/// desk's `all`); without it only the controls that say something remain.
+fn header_controls(
+    model: &QueueFrameModel<'_>,
+    compact: bool,
+    idle: bool,
+) -> Vec<(QueueHitTarget, String)> {
+    let mut controls = Vec::new();
+    if let Some(layout) = model.nav.layout.as_ref() {
+        let (group, sort) = if compact {
+            ("g:", "s:")
+        } else {
+            ("group: ", "sort: ")
+        };
+        if idle || !layout.group_is_default() {
+            controls.push((
+                QueueHitTarget::NavGroup,
+                format!(" {group}{} \u{25be} ", layout.group),
+            ));
+        }
+        if idle || !layout.sort_is_default() {
+            controls.push((
+                QueueHitTarget::NavSort,
+                format!(" {sort}{} \u{25be} ", layout.sort),
+            ));
+        }
+    }
+    if let Some(chip) = model.nav.chip.as_ref() {
+        if idle || !chip.optional {
+            controls.push((
+                QueueHitTarget::NavChip,
+                format!(" {} \u{25be} ", chip.label),
+            ));
+        }
+    }
+    controls
+}
+
+/// The first of the header's spellings that fits `room` cells, in order: every control in
+/// full words, every control keyed, then only the non-default controls in full words and
+/// keyed. Defaults always drop before anything that says something. When nothing fits,
+/// the keyed non-default set is returned and the painter drops its leading controls, so
+/// the filter goes last.
+fn fitted_controls(model: &QueueFrameModel<'_>, room: usize) -> Vec<(QueueHitTarget, String)> {
+    for (idle, compact) in [(true, false), (true, true), (false, false)] {
+        let controls = header_controls(model, compact, idle);
+        if controls_width(&controls) <= room {
+            return controls;
+        }
+    }
+    header_controls(model, true, false)
+}
+
+/// The selector row's right-side controls: the widest spelling that fits beside the tabs
+/// ([`fitted_controls`]). When even the non-default controls do not fit there, they take
+/// their own row under the tabs, where defaults rejoin them if the row has room; when
+/// every control sits at its default, nothing costs a row. `g`, `s` and `t` always open
+/// their pickers either way.
+fn selector_controls(model: &QueueFrameModel<'_>, width: u16) -> Vec<(QueueHitTarget, String)> {
+    let beside = (width as usize).saturating_sub(selector_tabs_width(model, width));
+    let controls = fitted_controls(model, beside);
+    if controls_width(&controls) <= beside {
+        return controls;
+    }
+    if header_controls(model, true, false).is_empty() {
+        return Vec::new();
+    }
+    fitted_controls(model, width as usize)
+}
+
+fn controls_width(controls: &[(QueueHitTarget, String)]) -> usize {
+    controls
+        .iter()
+        .map(|(_, text)| display_width(text))
+        .sum::<usize>()
+        + controls.len().saturating_sub(1)
+}
+
+/// Paint `controls` right-aligned after `left_width` cells already used, pushing hits.
+/// When they do not all fit, the leading controls (the layout indicator) drop first;
+/// the chip is clipped only when it alone exceeds the row.
+fn push_selector_controls(
+    spans: &mut Vec<Span<'static>>,
+    hits: &mut Vec<(QueueHitTarget, u16, u16)>,
+    mut controls: Vec<(QueueHitTarget, String)>,
+    left_width: usize,
+    width: usize,
+) {
+    while controls.len() > 1 && left_width + controls_width(&controls) > width {
+        controls.remove(0);
+    }
+    let room = width.saturating_sub(left_width);
+    let shown: Vec<(QueueHitTarget, String)> = controls
+        .into_iter()
+        .map(|(target, text)| (target, present_line(&text, room)))
+        .collect();
+    let total = controls_width(&shown).min(room);
+    let mut x = left_width + room.saturating_sub(total);
+    spans.push(Span::styled(" ".repeat(x - left_width), style_plain()));
+    for (index, (target, text)) in shown.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ".to_string(), style_plain()));
+            x += 1;
+        }
+        let w = display_width(&text);
+        hits.push((target, x as u16, w.max(1) as u16));
+        spans.push(Span::styled(text, style_dim()));
+        x += w;
+    }
 }
 
 /// Active tab labels keep a cell of padding for hit targets; underline only the word,
@@ -6316,54 +6749,65 @@ fn paint_selector_row(
     // The active destination's control rides the row's right side when it fits. Narrow
     // frames paint it on the dedicated row added by `draw_queue_frame_impl`.
     if !selector_chip_wraps(model, geo.row_width) {
-        if let Some(chip) = model.nav.chip.as_ref() {
-            let chip_text = present_line(&format!(" {} \u{25be} ", chip.label), width);
-            let chip_w = display_width(&chip_text);
-            let spacer_w = width.saturating_sub(left_width).saturating_sub(chip_w);
-            let chip_x = (left_width + spacer_w) as u16;
-            spans.push(Span::styled(" ".repeat(spacer_w), style_plain()));
-            spans.push(Span::styled(chip_text, style_dim()));
-            hits.push((QueueHitTarget::NavChip, chip_x, chip_w.max(1) as u16));
+        let controls = selector_controls(model, geo.row_width);
+        if !controls.is_empty() {
+            push_selector_controls(&mut spans, &mut hits, controls, left_width, width);
         }
     }
 
     (bound_line(Line::from(spans), width), hits)
 }
 
-/// The wrapped control's text rows, never truncated: the label wraps at word boundaries
-/// (`#thread` and `@assignee` land on their own rows when both do not fit) and the
-/// chevron closes the last row.
-fn selector_chip_rows(model: &QueueFrameModel<'_>, width: u16) -> Vec<String> {
-    let Some(chip) = model.nav.chip.as_ref() else {
+/// The header controls' own rows under the tabs: one row when the controls fit it (leading
+/// controls drop first, as beside the tabs). A chip wider than the whole row, a long
+/// `#thread @assignee` filter, wraps at word boundaries onto further right-aligned rows
+/// instead of truncating, the chevron closing the last row.
+fn selector_chip_rows(
+    model: &QueueFrameModel<'_>,
+    width: u16,
+) -> Vec<Vec<(QueueHitTarget, String)>> {
+    let width_cells = width as usize;
+    let mut controls = selector_controls(model, width);
+    while controls.len() > 1 && controls_width(&controls) > width_cells {
+        controls.remove(0);
+    }
+    if controls.is_empty() {
         return Vec::new();
-    };
-    let room = (width as usize).saturating_sub(4).max(1);
-    let rows = wrapped_rows(&chip.label, room);
-    let last = rows.len().saturating_sub(1);
-    rows.into_iter()
-        .enumerate()
-        .map(|(index, row)| {
-            if index == last {
-                format!(" {row} \u{25be} ")
-            } else {
-                format!(" {row}   ")
-            }
-        })
-        .collect()
+    }
+    let chip_label = model.nav.chip.as_ref().map(|chip| chip.label.clone());
+    match (controls.as_slice(), chip_label) {
+        ([(QueueHitTarget::NavChip, text)], Some(label)) if display_width(text) > width_cells => {
+            let room = width_cells.saturating_sub(4).max(1);
+            let rows = wrapped_rows(&label, room);
+            let last = rows.len().saturating_sub(1);
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let text = if index == last {
+                        format!(" {row} \u{25be} ")
+                    } else {
+                        format!(" {row}   ")
+                    };
+                    vec![(QueueHitTarget::NavChip, text)]
+                })
+                .collect()
+        }
+        _ => vec![controls],
+    }
 }
 
-/// One right-aligned line per wrapped control row, with its x and width for hits.
-fn paint_selector_chip(model: &QueueFrameModel<'_>, width: u16) -> Vec<(Line<'static>, u16, u16)> {
+/// One painted header control row: its line and its hits as (target, x, width).
+type ControlRow = (Line<'static>, Vec<(QueueHitTarget, u16, u16)>);
+
+/// One right-aligned line per header control row, with its hits.
+fn paint_selector_chip(model: &QueueFrameModel<'_>, width: u16) -> Vec<ControlRow> {
     selector_chip_rows(model, width)
         .into_iter()
-        .map(|chip_text| {
-            let chip_width = display_width(&chip_text).min(width as usize);
-            let x = (width as usize).saturating_sub(chip_width) as u16;
-            let line = Line::from(vec![
-                Span::styled(" ".repeat(x as usize), style_plain()),
-                Span::styled(chip_text, style_dim()),
-            ]);
-            (line, x, chip_width.max(1) as u16)
+        .map(|controls| {
+            let mut spans = Vec::new();
+            let mut hits = Vec::new();
+            push_selector_controls(&mut spans, &mut hits, controls, 0, width as usize);
+            (bound_line(Line::from(spans), width as usize), hits)
         })
         .collect()
 }
@@ -6420,28 +6864,16 @@ fn paint_verb_bar(
     (line, hits)
 }
 
-fn row_meta(
-    task: &Task,
-    _now: SystemTime,
-    project_attribution: bool,
-    thread_label: bool,
-) -> String {
-    let project = if project_attribution {
-        match &task.scope {
-            TaskScope::Project { path } => Some(short_project(path).to_string()),
-            TaskScope::Global => Some("desk".to_string()),
-        }
-    } else {
-        None
-    };
-    let assignee = task.assignee.as_deref().map(|name| format!("@{name}"));
-    let base = task.base.as_deref().map(|name| format!("⎇ {name}"));
-    let thread = if thread_label {
-        task.thread.as_deref().map(|name| format!("#{name}"))
-    } else {
-        None
-    };
-    fit_row_meta(assignee, base, thread, project)
+/// The row label: `#thread · project`, each part only when its flag is set.
+fn row_label(task: &Task, thread: bool, project: bool) -> String {
+    let thread = thread
+        .then(|| task.thread.as_deref().map(|name| format!("#{name}")))
+        .flatten();
+    let project = project.then(|| match &task.scope {
+        TaskScope::Project { path } => short_project(path).to_string(),
+        TaskScope::Global => "desk".to_string(),
+    });
+    fit_row_meta(None, None, thread, project)
 }
 
 /// Keep the genuine project/thread attribution intact. Relative ages belong to task-page
@@ -6587,6 +7019,109 @@ mod tests {
             .collect::<String>()
     }
 
+    #[test]
+    fn a_row_label_flows_dim_after_the_title_at_every_width_and_never_truncates() {
+        fn row(title: &str, selected: bool) -> TaskRowPaint<'_> {
+            TaskRowPaint {
+                glyph: "○",
+                identifier: Some("T3"),
+                title,
+                selected,
+                marked: false,
+                title_bold: false,
+                dim: false,
+            }
+        }
+        let texts = |lines: &[TaskRowLine]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|line| plain(&line.line).trim_end().to_string())
+                .collect()
+        };
+        for width in [40, 60, 80, 120] {
+            let geo = tier::resolve(width, 24);
+            // A short title carries the label two cells after its last word, dim.
+            let short = paint_labelled_task_row_lines(
+                &row("Short title", true),
+                &geo,
+                0,
+                false,
+                Some("#release · tsk"),
+            );
+            assert_eq!(
+                texts(&short),
+                vec!["▸ ○ T3 Short title  #release · tsk"],
+                "width {width}"
+            );
+            let label = short[0].line.spans.last().expect("label span");
+            assert_eq!(label.content.as_ref(), "  #release · tsk");
+            assert_eq!(label.style, style_dim());
+
+            // A wrapped title keeps every cell, and the label is still painted in full.
+            let long_title = "word ".repeat(20);
+            let wrapped = paint_task_row_lines(&row(&long_title, true), &geo, 0, false);
+            let labelled = paint_labelled_task_row_lines(
+                &row(&long_title, true),
+                &geo,
+                0,
+                false,
+                Some("#release · herdr-file-viewer"),
+            );
+            let all = texts(&labelled).join("\n");
+            assert!(!all.contains('…'), "width {width}: {all}");
+            assert!(
+                all.replace('\n', " ").contains("#release ·"),
+                "width {width}: {all}"
+            );
+            for (index, line) in texts(&wrapped).iter().enumerate() {
+                assert!(
+                    texts(&labelled)[index].starts_with(line.as_str()),
+                    "width {width}: a label never changes how the title wraps"
+                );
+            }
+        }
+        // A label that does not fit after the title's last line starts the next line at
+        // the title's indent.
+        let geo = tier::resolve(40, 24);
+        let lines = paint_labelled_task_row_lines(
+            &row("A title that fills the row now", false),
+            &geo,
+            0,
+            false,
+            Some("#release · atlas"),
+        );
+        assert_eq!(
+            texts(&lines),
+            vec![
+                "  ○ T3 A title that fills the row now",
+                "       #release · atlas"
+            ]
+        );
+
+        // A label longer than the title room wraps like a title, every cell kept, each
+        // line at the title's indent and inside the row.
+        // 38 cells: one line at the row width, two at the title room.
+        let label = "#release-candidate-x · herdr-viewer-ab";
+        let lines =
+            paint_labelled_task_row_lines(&row("Short title", false), &geo, 0, false, Some(label));
+        let painted = texts(&lines);
+        assert_eq!(painted[0], "  ○ T3 Short title");
+        let tail: Vec<&str> = painted[1..].iter().map(|line| line.as_str()).collect();
+        assert!(tail.len() > 1, "the label itself wraps: {painted:?}");
+        for line in &tail {
+            assert!(line.starts_with("       ") && !line[7..].starts_with(' '));
+            assert!(display_width(line) <= 38, "inside the row: {line:?}");
+        }
+        assert_eq!(
+            tail.iter()
+                .map(|line| line.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+            label,
+            "the whole label survives"
+        );
+    }
+
     fn paint_to_buffer(line: Line<'static>, width: u16) -> Buffer {
         let backend = TestBackend::new(width, 1);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -6604,6 +7139,7 @@ mod tests {
             sections: vec![],
             counts: crate::ui::queue::StatusCounts::default(),
             projects: vec![],
+            group: GroupBy::None,
         };
         let model = QueueFrameModel {
             tasks: &[],
@@ -6615,8 +7151,11 @@ mod tests {
                 slot2_label: "x".repeat(32),
                 slot2_project: true,
                 chip: None,
+                layout: None,
             },
             surface: BoardSurface::Projects,
+            thread_labels: false,
+            show_project_meta: false,
             projects: &[],
             projects_index: false,
             projects_cursor: 0,
@@ -6641,6 +7180,7 @@ mod tests {
             inbox_collapsed: false,
             inbox_header_selected: false,
             rows_dim: false,
+            folded_groups: BTreeSet::new(),
         };
         let (line, hits) = paint_selector_row(&model, &tier::resolve(40, 24));
         let text = plain(&line);
@@ -6665,6 +7205,7 @@ mod tests {
             sections: vec![],
             counts: crate::ui::queue::StatusCounts::default(),
             projects: vec![],
+            group: GroupBy::None,
         });
         QueueFrameModel {
             tasks: &[],
@@ -6676,8 +7217,11 @@ mod tests {
                 slot2_label: "tsk".to_string(),
                 slot2_project: true,
                 chip: None,
+                layout: None,
             },
             surface: BoardSurface::Desk,
+            thread_labels: false,
+            show_project_meta: false,
             projects: &[],
             projects_index: false,
             projects_cursor: 0,
@@ -6702,6 +7246,7 @@ mod tests {
             inbox_collapsed: false,
             inbox_header_selected: false,
             rows_dim: false,
+            folded_groups: BTreeSet::new(),
         }
     }
 
@@ -6791,6 +7336,7 @@ mod tests {
             sections: vec![],
             counts: crate::ui::queue::StatusCounts::default(),
             projects: projects.clone(),
+            group: GroupBy::None,
         };
         let model = QueueFrameModel {
             tasks: &[],
@@ -6802,8 +7348,11 @@ mod tests {
                 slot2_label: "select project".into(),
                 slot2_project: false,
                 chip: None,
+                layout: None,
             },
             surface: BoardSurface::Projects,
+            thread_labels: false,
+            show_project_meta: false,
             projects: &projects,
             projects_index: true,
             projects_cursor: 0,
@@ -6828,6 +7377,7 @@ mod tests {
             inbox_collapsed: false,
             inbox_header_selected: false,
             rows_dim: false,
+            folded_groups: BTreeSet::new(),
         };
         // The status row paints the selected path, escaped.
         let idle = idle_context(&model);

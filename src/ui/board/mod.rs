@@ -25,9 +25,9 @@ pub use dispatch_card::DispatchChoice;
 pub use draw::{board_hit_map, board_verb_items, draw_board};
 pub use launch_card::{LaunchChoice, LaunchPrompt};
 pub use model::{
-    nothing_to_dispatch, project_option_label, BoardInputMode, BoardModel, BoardTab, BulkCleanup,
-    BulkDispatchRun, CleanupPr, CleanupPrompt, CleanupRow, CleanupRowState, CleanupRun,
-    CleanupRunRow, DispatchPrompt, FilterTab, IntentOutcome, ListPickerKind, MergedPr,
+    nothing_to_dispatch, project_option_label, BoardInputMode, BoardLayout, BoardModel, BoardTab,
+    BulkCleanup, BulkDispatchRun, CleanupPr, CleanupPrompt, CleanupRow, CleanupRowState,
+    CleanupRun, CleanupRunRow, DispatchPrompt, FilterTab, IntentOutcome, ListPickerKind, MergedPr,
     PendingLaunch, PickerTab, ProjectScopeOption, ProjectsView, RelaunchPrompt, SaveResolution,
     StartAnywayPrompt, BOARD_TITLE, CLEANUP_BUSY, FINISHING_CLEANUP, REFRESHING_BRANCHES,
 };

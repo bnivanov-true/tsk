@@ -54,7 +54,10 @@ fn normal_mode_keymap_equals_the_readme_and_queue_board_v1_set() {
         (KeyCode::Char('f'), BoardIntent::File, true),
         (KeyCode::Char('+'), BoardIntent::OpenCapture, false),
         (KeyCode::Char('d'), BoardIntent::ToggleDoneDrawer, false),
-        (KeyCode::Char('g'), BoardIntent::ToggleAllGroups, false),
+        (KeyCode::Char('g'), BoardIntent::OpenGroupPicker, false),
+        (KeyCode::Char('s'), BoardIntent::OpenSortPicker, false),
+        (KeyCode::Char('f'), BoardIntent::FoldGroup, false),
+        (KeyCode::Char('F'), BoardIntent::FoldAllGroups, false),
         (KeyCode::Char('p'), BoardIntent::OpenProjectSelector, false),
         (
             KeyCode::Char('t'),
@@ -91,9 +94,9 @@ fn normal_mode_keymap_equals_the_readme_and_queue_board_v1_set() {
         if needs_ctrl {
             assert_eq!(ctrl(key), Some(intent), "ctrl+{key:?}");
             // A bare mutating letter is dead unless the same letter carries a bare route
-            // of its own (`d` opens the done drawer, `g` folds groups, `r` opens the reply
-            // box under a blocked row).
-            if !matches!(key, KeyCode::Char('d' | 'g' | 'r')) {
+            // of its own (`d` opens the done drawer, `g` groups, `s` sorts, `f` folds, `r` opens
+            // the reply box under a blocked row).
+            if !matches!(key, KeyCode::Char('d' | 'g' | 's' | 'f' | 'r')) {
                 assert_eq!(normal(key), None, "bare mutating key {key:?} must be dead");
             }
         } else {
@@ -128,6 +131,13 @@ fn normal_mode_keymap_equals_the_readme_and_queue_board_v1_set() {
         Some(BoardIntent::ToggleDoneDrawer)
     );
     assert_eq!(ctrl(KeyCode::Char('d')), Some(BoardIntent::Complete));
+    assert_eq!(
+        normal(KeyCode::Char('s')),
+        Some(BoardIntent::OpenSortPicker)
+    );
+    assert_eq!(ctrl(KeyCode::Char('s')), Some(BoardIntent::PrimaryVerb));
+    assert_eq!(normal(KeyCode::Char('f')), Some(BoardIntent::FoldGroup));
+    assert_eq!(ctrl(KeyCode::Char('f')), Some(BoardIntent::File));
 
     for retired in ['a', 'c', 'i', 'z', 'P', '1', '2', '3', '[', ']'] {
         assert_eq!(

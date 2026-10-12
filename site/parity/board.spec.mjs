@@ -57,7 +57,10 @@ async function paintedRow(locator) {
   return locator.evaluate((el) => {
     const prefixEl = el.querySelector(".tsk-row-prefix");
     const prefix = prefixEl.textContent.split("\n");
-    const titles = [...el.querySelectorAll(".tsk-title-line")];
+    // Title lines, then any row-label lines that wrapped below them.
+    const titles = [
+      ...el.querySelectorAll(".tsk-title-line, .tsk-row-title > .tsk-row-label"),
+    ];
     const lines = titles.map((line, i) =>
       `${prefix[i] ?? " ".repeat(prefix[0].length)}${line.textContent}`.trimEnd(),
     );
@@ -352,15 +355,14 @@ for (const width of [40, 78, 109])
     await expect(page.locator(".tsk-tab")).toHaveCount(3);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowRight");
+    // A project board leaves its own project out of the label.
     await expect(page.locator(".tsk-attribution")).toHaveText(
-      "    └─ #release · tsk-parity",
+      "    └─ #release",
     );
     await capture(page, info, "thread-peek");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowRight");
-    await expect(page.locator(".tsk-attribution")).toHaveText(
-      "    └─ tsk-parity",
-    );
+    await expect(page.locator(".tsk-attribution")).toHaveCount(0);
     await expect(page.locator(".tsk-peek")).toContainText(["no notes yet"]);
     await capture(page, info, "unlabeled-peek");
   });
@@ -771,4 +773,79 @@ test("landing column readout excludes board padding", async ({ page }) => {
   });
   await page.addScriptTag({ url: "/public/landing.js" });
   await expect(page.locator("[data-cols] b")).toHaveText("78");
+});
+
+for (const width of [40, 78])
+  test(`row labels flow after the title at ${width}`, async ({ page }) => {
+    await open(page, width);
+    await expect(row(page, 16).locator(".tsk-row-label")).toHaveText(
+      width === 40 ? "#triage" : "  #triage",
+    );
+  });
+
+test("sub-headers fold with arrows and Enter opens their board", async ({
+  page,
+}) => {
+  await open(page, 78);
+  await page.keyboard.press("g");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  const release = page.locator('[data-collapse$=":t:release"]').first();
+  await expect(release).toContainText("▾");
+  await release.click();
+  await expect(release).toContainText("▾");
+  await expect(release.locator("strong")).toHaveCount(1);
+  await page.keyboard.press("h");
+  await expect(release).toContainText("▸");
+  await page.keyboard.press("l");
+  await expect(release).toContainText("▾");
+  await page.keyboard.press("h");
+  await expect(release).toContainText("▸");
+  await page.keyboard.press("h");
+  await expect(release).toContainText("▸");
+  await page.keyboard.press("l");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#board-demo")).toContainText("#release");
+  await expect(row(page, 14)).toBeVisible();
+  await expect(row(page, 16)).toHaveCount(0);
+});
+
+test("a click selects a header and a double-click opens or folds it", async ({
+  page,
+}) => {
+  await open(page, 78);
+  await page.keyboard.press("g");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  // Separate gestures wait out the 350 ms double-click window.
+  const settle = () => page.waitForTimeout(400);
+  const loose = page.locator('[data-collapse$=":none"]').first();
+  await loose.click();
+  await expect(loose).toContainText("▾");
+  await settle();
+  await loose.dblclick();
+  await expect(loose).toContainText("▸");
+  await settle();
+  await loose.dblclick();
+  await expect(loose).toContainText("▾");
+  await settle();
+  // A click elsewhere between two header clicks leaves two single clicks.
+  await loose.click();
+  await page.locator("#board-demo [data-task]").first().click();
+  await loose.click();
+  await expect(loose).toContainText("▾");
+  await settle();
+  const inbox = page.locator("[data-inbox-header]");
+  await inbox.click();
+  await expect(inbox).toContainText("▾");
+  await settle();
+  await inbox.dblclick();
+  await expect(inbox).toContainText("▸");
+  await settle();
+  await page.locator('[data-collapse$=":t:release"]').first().dblclick();
+  await expect(page.locator("#board-demo")).toContainText("#release");
+  await expect(row(page, 14)).toBeVisible();
+  await expect(row(page, 16)).toHaveCount(0);
 });

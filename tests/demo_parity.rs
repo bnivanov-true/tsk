@@ -16,10 +16,6 @@ use tsk_tui::{
     },
 };
 
-/// The harness's terminal rows, matching `height` in `site/parity/server.mjs`. Tall enough for
-/// the 40-column desk to fit T12's wrapped title without a scrollbar.
-const HEIGHT: u16 = 28;
-
 fn key(
     state: &mut DomainState,
     model: &mut BoardModel,
@@ -42,6 +38,10 @@ fn key(
         apply_intent(state, model, intent, None).unwrap();
     }
 }
+/// Frame height for every reference. The browser demo paints the whole list without a
+/// scrollbar, so the app frame must be tall enough that its list never scrolls either.
+const HEIGHT: u16 = 40;
+
 fn capture(model: &BoardModel, width: u16, _name: &str) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, HEIGHT)).unwrap();
     terminal
@@ -471,7 +471,9 @@ fn fixture_flow(export: bool) {
                 KeyModifiers::NONE,
                 width,
             );
-            assert!(capture(&model, width, "unlabeled-peek").contains("└─ tsk-parity"));
+            // A project board leaves its own project out of the label, so an unthreaded
+            // task's peek closes without one.
+            assert!(!capture(&model, width, "unlabeled-peek").contains("└─ tsk-parity"));
         }
     }
     // The project preview paints the same live line and block peek as the board.
