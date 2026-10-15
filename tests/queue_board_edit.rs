@@ -13,7 +13,7 @@ use tsk_tui::ui::board::{
     SHIFT_ENTER_AS_CTRL_J_HINT,
 };
 use tsk_tui::ui::capture::CaptureField;
-use tsk_tui::ui::input::{map_board_form_key, map_key, BoardIntent};
+use tsk_tui::ui::input::{map_board_form_key, map_key, map_task_form_key, BoardIntent};
 use tsk_tui::ui::render::QueueHitTarget;
 
 const THIS_REPO: &str = "/repos/app";
@@ -2036,4 +2036,206 @@ fn alt_arrows_on_the_task_page_move_the_selected_step() {
         Some(BoardIntent::MoveStepUp),
         "the board list has no step to move"
     );
+}
+
+/// GitHub #204: in a multi-line Notes draft the macOS word keys move and delete by word, and
+/// a word deletion stops at a line break before removing it on the next press.
+#[test]
+fn notes_macos_word_keys_move_and_delete_words_and_stop_at_line_breaks() {
+    let mut domain = DomainState::new();
+    domain
+        .create(
+            "Notes Task",
+            Some("orig notes".into()),
+            project(THIS_REPO),
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    apply_intent(&mut domain, &mut model, BoardIntent::BeginEditNotes, None).expect("notes");
+    assert_eq!(model.input_mode(), BoardInputMode::EditNotes);
+
+    let mut press = |model: &mut BoardModel, key: KeyEvent| {
+        let intent = map_key(model.input_mode(), key).expect("mapped key");
+        apply_intent(&mut domain, model, intent, None).expect("apply key");
+    };
+    let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
+    let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    press(&mut model, plain(KeyCode::Enter));
+    for character in "alpha beta".chars() {
+        press(&mut model, plain(KeyCode::Char(character)));
+    }
+    assert_eq!(model.edit_buffer(), "orig notes\nalpha beta");
+
+    // Option+← (and its Esc-b spelling) jumps to the word start; typing lands there.
+    press(&mut model, alt(KeyCode::Left));
+    press(&mut model, plain(KeyCode::Char('X')));
+    assert_eq!(model.edit_buffer(), "orig notes\nalpha Xbeta");
+    press(&mut model, alt(KeyCode::Char('b')));
+    press(&mut model, plain(KeyCode::Char('Y')));
+    assert_eq!(model.edit_buffer(), "orig notes\nalpha YXbeta");
+
+    // Option+→ / Esc-f, then Option+Backspace takes the word before the cursor.
+    press(&mut model, alt(KeyCode::Right));
+    press(&mut model, alt(KeyCode::Char('f')));
+    press(&mut model, alt(KeyCode::Char('f')));
+    press(&mut model, alt(KeyCode::Backspace));
+    assert_eq!(model.edit_buffer(), "orig notes\nalpha ");
+
+    // ctrl+w takes the rest of the line, stops at the break, then removes the break alone.
+    press(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(model.edit_buffer(), "orig notes\n");
+    press(&mut model, alt(KeyCode::Backspace));
+    assert_eq!(model.edit_buffer(), "orig notes");
+
+    // Option+Delete and alt+d delete the word after the cursor.
+    press(&mut model, plain(KeyCode::Home));
+    press(&mut model, alt(KeyCode::Delete));
+    assert_eq!(model.edit_buffer(), " notes");
+    press(&mut model, alt(KeyCode::Char('d')));
+    assert_eq!(model.edit_buffer(), "");
+
+    // A lone Esc still cancels: Meta sequences never hold it back.
+    press(&mut model, plain(KeyCode::Esc));
+    assert_ne!(model.input_mode(), BoardInputMode::EditNotes);
+}
+
+/// Cmd+← arrives as ctrl+a on macOS terminals: inside Notes, Title, and a new step it moves to
+/// line start instead of opening a step, while Enter in a new step still opens the next row.
+#[test]
+fn ctrl_a_in_a_text_field_moves_to_line_start_and_never_adds_a_step() {
+    let mut domain = DomainState::new();
+    let id = domain
+        .create(
+            "Title here",
+            Some("one\ntwo".into()),
+            project(THIS_REPO),
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    fn press(domain: &mut DomainState, model: &mut BoardModel, key: KeyEvent) {
+        let intent =
+            map_task_form_key(model.form_focus().expect("form"), false, key).expect("mapped key");
+        apply_intent(domain, model, intent, None).expect("apply key");
+    }
+
+    apply_intent(&mut domain, &mut model, BoardIntent::BeginEditNotes, None).expect("notes");
+    press(&mut domain, &mut model, ctrl_a);
+    press(&mut domain, &mut model, plain(KeyCode::Char('X')));
+    assert_eq!(model.edit_buffer(), "one\nXtwo");
+    assert_eq!(model.input_mode(), BoardInputMode::EditNotes);
+
+    apply_intent(&mut domain, &mut model, BoardIntent::FormFocusPrev, None).expect("title");
+    assert_eq!(model.form_focus(), Some(CaptureField::Title));
+    press(&mut domain, &mut model, ctrl_a);
+    press(&mut domain, &mut model, plain(KeyCode::Char('Y')));
+    assert_eq!(model.input_mode(), BoardInputMode::EditTitle);
+
+    apply_intent(&mut domain, &mut model, BoardIntent::BeginAddStep, None).expect("add step");
+    assert_eq!(model.input_mode(), BoardInputMode::EditStep);
+    for character in "ab".chars() {
+        let intent = map_key(BoardInputMode::EditStep, plain(KeyCode::Char(character))).unwrap();
+        apply_intent(&mut domain, &mut model, intent, None).expect("type");
+    }
+    let intent = map_key(BoardInputMode::EditStep, ctrl_a).expect("ctrl+a in step");
+    assert_eq!(intent, BoardIntent::EditMoveLineStart);
+    apply_intent(&mut domain, &mut model, intent, None).expect("line start");
+    apply_intent(&mut domain, &mut model, BoardIntent::EditInsert('Z'), None).expect("type");
+    // Enter saves this step and opens the next empty row.
+    let enter = map_key(BoardInputMode::EditStep, plain(KeyCode::Enter)).expect("enter");
+    apply_intent(&mut domain, &mut model, enter, None).expect("save step");
+    assert_eq!(
+        model.input_mode(),
+        BoardInputMode::EditStep,
+        "next row is open"
+    );
+    // Esc closes the empty row; Shift+Enter on the task page saves the session.
+    let esc = map_key(BoardInputMode::EditStep, plain(KeyCode::Esc)).expect("esc");
+    apply_intent(&mut domain, &mut model, esc, None).expect("close empty row");
+    apply_intent(&mut domain, &mut model, BoardIntent::ConfirmEdit, None).expect("save task");
+    let task = domain.get(id).expect("task");
+    assert_eq!(task.title, "YTitle here");
+    assert_eq!(task.notes.as_deref(), Some("one\nXtwo"));
+    let steps: Vec<&str> = task.steps.iter().map(|step| step.text.as_str()).collect();
+    assert_eq!(steps, vec!["Zab"]);
+}
+
+/// Cmd+Backspace arrives as ctrl+u on macOS terminals (Ghostty, iTerm2 Natural Text Editing):
+/// in Notes it clears to line start and, at a line start, joins the line above; ctrl+k clears
+/// to line end and, at a line end, joins the line below. Routed through the task-edit map.
+#[test]
+fn ctrl_u_and_ctrl_k_delete_to_the_line_edge_and_join_lines_in_notes() {
+    let mut domain = DomainState::new();
+    let id = domain
+        .create(
+            "Line title",
+            Some("one\ntwo three".into()),
+            project(THIS_REPO),
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    fn press(domain: &mut DomainState, model: &mut BoardModel, key: KeyEvent) {
+        let intent =
+            map_task_form_key(model.form_focus().expect("form"), false, key).expect("mapped key");
+        apply_intent(domain, model, intent, None).expect("apply key");
+    }
+    let ctrl = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+    let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    apply_intent(&mut domain, &mut model, BoardIntent::BeginEditNotes, None).expect("notes");
+    // Cursor at the end of "two three": ctrl+u clears the line, then joins it to "one".
+    press(&mut domain, &mut model, ctrl('u'));
+    assert_eq!(model.edit_buffer(), "one\n");
+    press(&mut domain, &mut model, plain(KeyCode::Char('x')));
+    press(&mut domain, &mut model, plain(KeyCode::Home));
+    press(&mut domain, &mut model, ctrl('u'));
+    assert_eq!(
+        model.edit_buffer(),
+        "onex",
+        "ctrl+u at a line start joins the line above"
+    );
+
+    // ctrl+k: from the middle of a line to its end, then at the end it joins the next line.
+    press(&mut domain, &mut model, plain(KeyCode::End));
+    press(&mut domain, &mut model, plain(KeyCode::Enter));
+    press(&mut domain, &mut model, plain(KeyCode::Char('z')));
+    assert_eq!(model.edit_buffer(), "onex\nz");
+    for _ in 0..5 {
+        press(&mut domain, &mut model, plain(KeyCode::Left));
+    }
+    press(&mut domain, &mut model, ctrl('k'));
+    assert_eq!(model.edit_buffer(), "o\nz");
+    press(&mut domain, &mut model, ctrl('k'));
+    assert_eq!(
+        model.edit_buffer(),
+        "oz",
+        "ctrl+k at a line end joins the next line"
+    );
+    assert_eq!(model.input_mode(), BoardInputMode::EditNotes);
+
+    // Title is one line: ctrl+u takes everything before the cursor, ctrl+k everything after.
+    apply_intent(&mut domain, &mut model, BoardIntent::FormFocusPrev, None).expect("title");
+    press(&mut domain, &mut model, plain(KeyCode::Home));
+    for _ in 0..4 {
+        press(&mut domain, &mut model, plain(KeyCode::Right));
+    }
+    press(&mut domain, &mut model, ctrl('k'));
+    press(&mut domain, &mut model, plain(KeyCode::Char('!')));
+    press(&mut domain, &mut model, ctrl('u'));
+    press(&mut domain, &mut model, plain(KeyCode::Char('L')));
+    apply_intent(&mut domain, &mut model, BoardIntent::ConfirmEdit, None).expect("save");
+    let task = domain.get(id).expect("task");
+    assert_eq!(task.title, "L");
+    assert_eq!(task.notes.as_deref(), Some("oz"));
 }

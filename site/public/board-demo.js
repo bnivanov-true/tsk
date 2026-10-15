@@ -3382,9 +3382,16 @@ import { parseCapture } from "./capture.js";
     return renderTaskPage(selectedTask(), { preview: false, embedded });
   }
 
+  // The TUI's Notes bar names plain Enter too: it opens a line rather than saving.
+  function editVerbHint(field) {
+    return field === "notes"
+      ? "shift+enter save · esc cancel · enter new line"
+      : "shift+enter save · esc cancel";
+  }
+
   function previewPageVerbBar() {
     if (previewSteps.editor || previewSteps.dirty || preview.editField)
-      return "shift+enter save · esc cancel";
+      return editVerbHint(preview.editField);
     return PAGE_VERBS.map(
       (verb) =>
         `<button type="button" class="tsk-verb" data-preview-page-verb="${verb.id}">${verb.label}</button>`,
@@ -3489,7 +3496,7 @@ import { parseCapture } from "./capture.js";
         ? "index ◂ project"
         : "index ◂ project    ← index";
     }
-    if (state.editField) return "shift+enter save · esc cancel";
+    if (state.editField) return editVerbHint(state.editField);
     if (state.stage === "board") return "→ task pane";
     if (state.stage === "split")
       return "board ▸ task    → task · ← close · enter open";
@@ -3703,7 +3710,7 @@ import { parseCapture } from "./capture.js";
     // Same guard as previewPageVerbBar: a title or notes editor owns the footer, so the
     // verbs are not clickable while typing.
     if (steps.editor || steps.dirty || state.editField)
-      return "shift+enter save · esc cancel";
+      return editVerbHint(state.editField);
     return PAGE_VERBS.map(
       (v) =>
         `<button type="button" class="tsk-verb" data-page-verb="${v.id}">${v.label}</button>`,
@@ -3764,7 +3771,7 @@ import { parseCapture } from "./capture.js";
                ? esc(state.refuse)
                : hintBar([
                    { id: "save", label: "enter add" },
-                   { id: "details", label: "tab expand" },
+                   { id: "details", label: "tab notes" },
                    { id: "close", label: "esc close" },
                  ])
            }</div>`

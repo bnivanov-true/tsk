@@ -5313,10 +5313,11 @@ fn task_edit_delete_stages_until_save_and_esc_restores() {
     );
 }
 
-/// Ctrl+A reaches the independent step editor from task view and every task-edit focus,
-/// including Scope, Thread, and an already-open inline rename.
+/// Ctrl+A adds a step wherever no text cursor is open: task view, the cursorless Scope row,
+/// and a selected (not yet editing) Thread. Inside a text field it is line start instead,
+/// because macOS terminals send Cmd+← as ctrl+a (the partner of ctrl+e, Cmd+→).
 #[test]
-fn ctrl_a_opens_step_add_from_task_view_and_every_task_edit_state() {
+fn ctrl_a_adds_a_step_without_a_text_cursor_and_moves_to_line_start_with_one() {
     let (mut domain, mut model, id) = board_with_steps("Ctrl+A routes", None, &["first", "second"]);
     apply_intent(&mut domain, &mut model, BoardIntent::CloseLayer, None).expect("leave task edit");
 
@@ -5344,30 +5345,40 @@ fn ctrl_a_opens_step_add_from_task_view_and_every_task_edit_state() {
     for field in [
         CaptureField::Title,
         CaptureField::Notes,
-        CaptureField::Scope,
         CaptureField::Thread,
     ] {
-        apply_intent(
-            &mut domain,
-            &mut model,
-            BoardIntent::FocusFormField(field),
-            None,
-        )
-        .expect("focus task-edit field");
-        let add = map_task_form_key(field, false, ctrl(KeyCode::Char('a')))
-            .expect("Ctrl+A maps from each task-edit field");
-        assert_eq!(add, BoardIntent::BeginAddStep);
-        apply_intent(&mut domain, &mut model, add, None).expect("open add");
-        assert_eq!(model.input_mode(), BoardInputMode::EditStep);
-        apply_intent(&mut domain, &mut model, BoardIntent::CancelEdit, None).expect("close add");
+        assert_eq!(
+            map_task_form_key(field, false, ctrl(KeyCode::Char('a'))),
+            Some(BoardIntent::EditMoveLineStart),
+            "{field:?} has a text cursor: ctrl+a is line start"
+        );
     }
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::FocusFormField(CaptureField::Scope),
+        None,
+    )
+    .expect("focus scope");
+    let add = map_task_form_key(CaptureField::Scope, false, ctrl(KeyCode::Char('a')))
+        .expect("Ctrl+A maps from the cursorless Scope row");
+    assert_eq!(add, BoardIntent::BeginAddStep);
+    apply_intent(&mut domain, &mut model, add, None).expect("open add");
+    assert_eq!(model.input_mode(), BoardInputMode::EditStep);
+    apply_intent(&mut domain, &mut model, BoardIntent::CancelEdit, None).expect("close add");
+    assert_eq!(
+        map_key(BoardInputMode::SelectThread, ctrl(KeyCode::Char('a'))),
+        Some(BoardIntent::BeginAddStep),
+        "a selected Thread has no cursor yet"
+    );
 
+    // An open step editor (rename or add) has a cursor too.
     apply_intent(&mut domain, &mut model, BoardIntent::SelectStep(0), None).expect("rename first");
     assert_eq!(model.input_mode(), BoardInputMode::EditStep);
-    let add = map_key(BoardInputMode::EditStep, ctrl(KeyCode::Char('a'))).expect("inline Ctrl+A");
-    assert_eq!(add, BoardIntent::BeginAddStep);
-    apply_intent(&mut domain, &mut model, add, None).expect("replace rename with add");
-    assert_eq!(model.input_mode(), BoardInputMode::EditStep);
+    assert_eq!(
+        map_key(BoardInputMode::EditStep, ctrl(KeyCode::Char('a'))),
+        Some(BoardIntent::EditMoveLineStart)
+    );
     assert_eq!(domain.get(id).expect("task").steps.len(), 3);
 }
 
@@ -5386,8 +5397,7 @@ fn inline_step_arrow_keys_navigate_or_scroll_without_trapping_the_editor() {
     assert_eq!(model.input_mode(), BoardInputMode::EditStep);
     assert!(rendered_board(&model, 80, 24).contains("▸ ▪ second"));
 
-    let add = map_key(BoardInputMode::EditStep, ctrl(KeyCode::Char('a'))).expect("add maps");
-    apply_intent(&mut domain, &mut model, add, None).expect("open add");
+    apply_intent(&mut domain, &mut model, BoardIntent::BeginAddStep, None).expect("open add");
     apply_intent(
         &mut domain,
         &mut model,
@@ -7830,6 +7840,320 @@ fn altgr_characters_insert_in_every_text_field() {
                 "the capture path editor must insert {character:?}"
             );
         }
+    }
+}
+
+/// GitHub #204: the macOS word keys reach every cursor text field. Option+arrow arrives as
+/// `alt+←/→` or as the Meta sequences `Esc b` / `Esc f` (crossterm reports Alt+b / Alt+f);
+/// Option+Backspace as `alt+Backspace`; Option+Delete as `alt+Delete` or `alt+d`.
+#[test]
+fn macos_word_keys_move_and_delete_in_every_text_field() {
+    use BoardIntent as I;
+    let cases = [
+        (
+            alt(KeyCode::Left),
+            I::EditMoveWordLeft,
+            I::QuickAddMoveWordLeft,
+        ),
+        (
+            alt(KeyCode::Char('b')),
+            I::EditMoveWordLeft,
+            I::QuickAddMoveWordLeft,
+        ),
+        (
+            ctrl(KeyCode::Left),
+            I::EditMoveWordLeft,
+            I::QuickAddMoveWordLeft,
+        ),
+        (
+            alt(KeyCode::Right),
+            I::EditMoveWordRight,
+            I::QuickAddMoveWordRight,
+        ),
+        (
+            alt(KeyCode::Char('f')),
+            I::EditMoveWordRight,
+            I::QuickAddMoveWordRight,
+        ),
+        (
+            ctrl(KeyCode::Right),
+            I::EditMoveWordRight,
+            I::QuickAddMoveWordRight,
+        ),
+        (
+            alt(KeyCode::Backspace),
+            I::EditDeleteWordLeft,
+            I::QuickAddDeleteWordLeft,
+        ),
+        (
+            ctrl(KeyCode::Char('w')),
+            I::EditDeleteWordLeft,
+            I::QuickAddDeleteWordLeft,
+        ),
+        (
+            alt(KeyCode::Delete),
+            I::EditDeleteWordRight,
+            I::QuickAddDeleteWordRight,
+        ),
+        (
+            alt(KeyCode::Char('d')),
+            I::EditDeleteWordRight,
+            I::QuickAddDeleteWordRight,
+        ),
+    ];
+    for (key, edit, quick_add) in cases {
+        for mode in [
+            BoardInputMode::EditTitle,
+            BoardInputMode::EditNotes,
+            BoardInputMode::EditThread,
+            BoardInputMode::EditStep,
+        ] {
+            assert_eq!(map_key(mode, key), Some(edit.clone()), "{mode:?} {key:?}");
+        }
+        for field in [
+            CaptureField::Title,
+            CaptureField::Notes,
+            CaptureField::Thread,
+        ] {
+            assert_eq!(
+                map_task_form_key(field, false, key),
+                Some(edit.clone()),
+                "task form {field:?} {key:?}"
+            );
+        }
+        assert_eq!(
+            map_key(BoardInputMode::QuickAdd, key),
+            Some(quick_add),
+            "quick-add {key:?}"
+        );
+    }
+    // The one-line queries have no cursor; deleting their last word is the chord that applies.
+    for key in [alt(KeyCode::Backspace), ctrl(KeyCode::Char('w'))] {
+        for (mode, expected) in [
+            (BoardInputMode::Search, I::SearchQueryDeleteWord),
+            (BoardInputMode::Palette, I::CommandQueryDeleteWord),
+            (BoardInputMode::Help, I::HelpQueryDeleteWord),
+            (BoardInputMode::ListPicker, I::ListPickerQueryDeleteWord),
+        ] {
+            assert_eq!(map_key(mode, key), Some(expected), "{mode:?} {key:?}");
+        }
+    }
+}
+
+/// `ctrl+u` / `ctrl+k` delete to line start / end in every cursor text field (macOS
+/// terminals send Cmd+Backspace as ctrl+u), while outside text fields ctrl+u stays undo and
+/// the cursorless query surfaces leave both alone. AltGr+u / AltGr+k still type.
+#[test]
+fn ctrl_u_and_ctrl_k_delete_lines_in_text_fields_and_ctrl_u_stays_undo_outside() {
+    use BoardIntent as I;
+    for (letter, edit, quick_add) in [
+        ('u', I::EditDeleteToLineStart, I::QuickAddDeleteToLineStart),
+        ('k', I::EditDeleteToLineEnd, I::QuickAddDeleteToLineEnd),
+    ] {
+        let key = ctrl(KeyCode::Char(letter));
+        for mode in [
+            BoardInputMode::EditTitle,
+            BoardInputMode::EditNotes,
+            BoardInputMode::EditThread,
+            BoardInputMode::EditStep,
+        ] {
+            assert_eq!(
+                map_key(mode, key),
+                Some(edit.clone()),
+                "{mode:?} ctrl+{letter}"
+            );
+        }
+        for field in [
+            CaptureField::Title,
+            CaptureField::Notes,
+            CaptureField::Thread,
+        ] {
+            assert_eq!(
+                map_task_form_key(field, false, key),
+                Some(edit.clone()),
+                "task form {field:?} ctrl+{letter}"
+            );
+        }
+        assert_eq!(map_key(BoardInputMode::QuickAdd, key), Some(quick_add));
+        for mode in [
+            BoardInputMode::Search,
+            BoardInputMode::Palette,
+            BoardInputMode::Help,
+            BoardInputMode::ListPicker,
+        ] {
+            assert_eq!(
+                map_key(mode, key),
+                None,
+                "{mode:?} leaves ctrl+{letter} alone"
+            );
+        }
+        let altgr = ctrl_alt(KeyCode::Char(letter));
+        assert_eq!(
+            map_key(BoardInputMode::EditNotes, altgr),
+            Some(I::EditInsert(letter))
+        );
+        assert_eq!(
+            map_key(BoardInputMode::QuickAdd, altgr),
+            Some(I::QuickAddInsert(letter))
+        );
+    }
+    let undo = ctrl(KeyCode::Char('u'));
+    for mode in [
+        BoardInputMode::Normal,
+        BoardInputMode::TaskPage,
+        BoardInputMode::ProjectPicker,
+    ] {
+        assert_eq!(
+            map_key(mode, undo),
+            Some(I::Undo),
+            "{mode:?} ctrl+u is undo"
+        );
+    }
+    assert_eq!(
+        map_task_form_key(CaptureField::Scope, false, undo),
+        None,
+        "the cursorless Scope row has no line to delete"
+    );
+}
+
+/// Every cursorless query (search, palette, Help, list picker) drops its last word on
+/// `ctrl+w` / `alt+Backspace`, and the surface stays open while it does.
+#[test]
+fn query_surfaces_drop_their_last_word() {
+    let mut domain = DomainState::new();
+    domain
+        .create(
+            "Threaded",
+            None,
+            project(THIS_REPO),
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    let mut run = |model: &mut BoardModel, key: KeyEvent| {
+        let intent = map_key(model.input_mode(), key).expect("mapped key");
+        apply_intent(&mut domain, model, intent, None).expect("apply key");
+    };
+    let type_text =
+        |run: &mut dyn FnMut(&mut BoardModel, KeyEvent), model: &mut BoardModel, text: &str| {
+            for character in text.chars() {
+                run(model, press(KeyCode::Char(character)));
+            }
+        };
+
+    run(&mut model, press(KeyCode::Char('/')));
+    assert_eq!(model.input_mode(), BoardInputMode::Search);
+    type_text(&mut run, &mut model, "fix parser ");
+    run(&mut model, ctrl(KeyCode::Char('w')));
+    assert_eq!(model.search_query(), "fix ");
+    run(&mut model, alt(KeyCode::Backspace));
+    assert_eq!(model.search_query(), "");
+    run(&mut model, press(KeyCode::Esc));
+
+    run(&mut model, press(KeyCode::Char(':')));
+    assert_eq!(model.input_mode(), BoardInputMode::Palette);
+    type_text(&mut run, &mut model, "new task");
+    run(&mut model, ctrl(KeyCode::Char('w')));
+    assert_eq!(
+        model.input_mode(),
+        BoardInputMode::Palette,
+        "palette stays open"
+    );
+    assert_eq!(model.command_query(), "new ");
+    run(&mut model, alt(KeyCode::Backspace));
+    assert_eq!(model.command_query(), "");
+    run(&mut model, press(KeyCode::Esc));
+
+    run(&mut model, press(KeyCode::Char('?')));
+    assert_eq!(model.input_mode(), BoardInputMode::Help);
+    type_text(&mut run, &mut model, "word left");
+    run(&mut model, alt(KeyCode::Backspace));
+    assert_eq!(model.help_query(), "word ");
+    run(&mut model, press(KeyCode::Esc));
+    run(&mut model, press(KeyCode::Esc));
+
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::OpenThreadFilterPicker,
+        None,
+    )
+    .expect("open thread filter");
+    assert_eq!(model.input_mode(), BoardInputMode::ListPicker);
+    let mut run = |model: &mut BoardModel, key: KeyEvent| {
+        let intent = map_key(model.input_mode(), key).expect("mapped key");
+        apply_intent(&mut domain, model, intent, None).expect("apply key");
+    };
+    type_text(&mut run, &mut model, "ship it");
+    run(&mut model, ctrl(KeyCode::Char('w')));
+    assert_eq!(model.input_mode(), BoardInputMode::ListPicker);
+    assert_eq!(model.list_picker_query(), Some("ship "));
+}
+
+/// The word keys must not take a key that already means something: AltGr letters still type
+/// (Windows sends them as Ctrl+Alt), a lone Esc still cancels, `alt+↑/↓` still moves a step,
+/// and the scope row stays a chooser.
+#[test]
+fn macos_word_keys_leave_altgr_esc_and_step_moves_alone() {
+    for character in ['b', 'd', 'f', 'w'] {
+        let altgr = ctrl_alt(KeyCode::Char(character));
+        for mode in [
+            BoardInputMode::EditTitle,
+            BoardInputMode::EditNotes,
+            BoardInputMode::EditThread,
+            BoardInputMode::EditStep,
+        ] {
+            assert_eq!(
+                map_key(mode, altgr),
+                Some(BoardIntent::EditInsert(character)),
+                "{mode:?} AltGr+{character}"
+            );
+        }
+        assert_eq!(
+            map_key(BoardInputMode::QuickAdd, altgr),
+            Some(BoardIntent::QuickAddInsert(character))
+        );
+        assert_eq!(
+            map_key(BoardInputMode::Search, altgr),
+            Some(BoardIntent::SearchQueryInsert(character))
+        );
+        assert_eq!(
+            map_key(BoardInputMode::Palette, altgr),
+            Some(BoardIntent::CommandQueryInsert(character))
+        );
+    }
+    for mode in [
+        BoardInputMode::EditTitle,
+        BoardInputMode::EditNotes,
+        BoardInputMode::EditThread,
+    ] {
+        assert_eq!(
+            map_key(mode, press(KeyCode::Esc)),
+            Some(BoardIntent::CancelEdit)
+        );
+        assert_eq!(map_key(mode, alt(KeyCode::Up)), None, "{mode:?} alt+up");
+        assert_eq!(map_key(mode, alt(KeyCode::Down)), None, "{mode:?} alt+down");
+    }
+    assert_eq!(
+        map_key(BoardInputMode::QuickAdd, press(KeyCode::Esc)),
+        Some(BoardIntent::CancelQuickAdd)
+    );
+    assert_eq!(
+        map_key(BoardInputMode::TaskPage, alt(KeyCode::Up)),
+        Some(BoardIntent::MoveStepUp)
+    );
+    for key in [
+        alt(KeyCode::Left),
+        alt(KeyCode::Char('b')),
+        alt(KeyCode::Backspace),
+        ctrl(KeyCode::Char('w')),
+    ] {
+        assert_eq!(
+            map_key(BoardInputMode::EditScope, key),
+            None,
+            "scope {key:?}"
+        );
     }
 }
 
