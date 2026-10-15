@@ -199,6 +199,12 @@ pub enum BoardIntent {
     /// The nearest word boundary in the asked direction.
     EditMoveWordLeft,
     EditMoveWordRight,
+    /// Remove the word before / after the cursor, never across a line break.
+    EditDeleteWordLeft,
+    EditDeleteWordRight,
+    /// Remove to the start / end of the cursor's line, or the break there (joining lines).
+    EditDeleteToLineStart,
+    EditDeleteToLineEnd,
     ConfirmEdit,
     /// Shift+Enter in the inline step editor: save and continue. Add mode reopens the
     /// empty next row, while rename mode downgrades to a plain save-and-close (decided by
@@ -220,6 +226,10 @@ pub enum BoardIntent {
     QuickAddMoveLineEnd,
     QuickAddMoveWordLeft,
     QuickAddMoveWordRight,
+    QuickAddDeleteWordLeft,
+    QuickAddDeleteWordRight,
+    QuickAddDeleteToLineStart,
+    QuickAddDeleteToLineEnd,
     QuickAddSave,
     QuickAddSaveNext,
     ExpandQuickAdd,
@@ -266,11 +276,13 @@ pub enum BoardIntent {
     /// Paste into the open list picker's search query.
     ListPickerQueryInsertText(String),
     ListPickerQueryBackspace,
+    ListPickerQueryDeleteWord,
     /// Type into the active lens's search.
     SearchQueryInsert(char),
     /// Paste into the active lens's search.
     SearchQueryInsertText(String),
     SearchQueryBackspace,
+    SearchQueryDeleteWord,
     /// Mouse route onto a projects index row: select it and open its project in slot 2.
     SelectProjectRow(usize),
     /// Move the task page's step cursor onto one steps step by its painted absolute
@@ -306,6 +318,7 @@ pub enum BoardIntent {
     /// The query is one search line, so the reducer folds each pasted break to a space.
     CommandQueryInsertText(String),
     CommandQueryBackspace,
+    CommandQueryDeleteWord,
     /// `ctrl+s` — state-mapped primary verb. Reducer lands in.
     PrimaryVerb,
     /// `ctrl+b` — toggle blocked ↔ ready. Reducer lands in.
@@ -316,6 +329,7 @@ pub enum BoardIntent {
     HelpQueryInsert(char),
     HelpQueryInsertText(String),
     HelpQueryBackspace,
+    HelpQueryDeleteWord,
     HelpScrollUp,
     HelpScrollDown,
     /// Explicit mouse dismissal closes Help immediately, even with a nonempty query.
@@ -1020,7 +1034,7 @@ fn help_bindings() -> Vec<HelpBinding> {
         help_binding(
             HelpGroup::CreateEdit,
             "tab",
-            "expand to page (quick-add)",
+            "notes and details (quick-add)",
             "capture details",
         ),
         help_binding(
@@ -1121,15 +1135,33 @@ fn help_bindings() -> Vec<HelpBinding> {
         ),
         help_binding(
             HelpGroup::SurfaceControls,
-            "ctrl+←",
+            "ctrl+← / alt+←",
             "word left (text input)",
-            "cursor editing quick-add",
+            "cursor editing quick-add option meta esc b",
         ),
         help_binding(
             HelpGroup::SurfaceControls,
-            "ctrl+→",
+            "ctrl+→ / alt+→",
             "word right (text input)",
-            "cursor editing quick-add",
+            "cursor editing quick-add option meta esc f",
+        ),
+        help_binding(
+            HelpGroup::SurfaceControls,
+            "alt+backspace / ctrl+w",
+            "delete word left (text, search)",
+            "erase editing quick-add option palette filter",
+        ),
+        help_binding(
+            HelpGroup::SurfaceControls,
+            "ctrl+u / ctrl+k",
+            "delete to line start / end (text)",
+            "erase editing quick-add cmd backspace kill",
+        ),
+        help_binding(
+            HelpGroup::SurfaceControls,
+            "alt+delete / alt+d",
+            "delete word right (text)",
+            "erase editing quick-add option",
         ),
         help_binding(
             HelpGroup::SurfaceControls,
@@ -1361,7 +1393,6 @@ pub fn map_key(mode: BoardInputMode, key: KeyEvent) -> Option<BoardIntent> {
                     .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
             {
                 match key.code {
-                    KeyCode::Char('a') => Some(BoardIntent::BeginAddStep),
                     KeyCode::Char('d') => Some(BoardIntent::Complete),
                     KeyCode::Char('o') => Some(BoardIntent::Reopen),
                     KeyCode::Char('x') | KeyCode::Delete => Some(BoardIntent::SoftDelete),
@@ -1443,12 +1474,15 @@ fn map_selected_thread_key(key: KeyEvent) -> Option<BoardIntent> {
     if key.code == KeyCode::Enter && key.modifiers.is_empty() {
         return Some(BoardIntent::ToggleThreadEditing);
     }
+    // No text cursor is open on a selected Thread, so ctrl+a still adds a step here.
+    if key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::CONTROL {
+        return Some(BoardIntent::BeginAddStep);
+    }
     // A selected footer is navigation, not an invisible editor. Retain only session controls
     // from the shared field map, so printable input cannot mutate a draft without a cursor.
     match map_form_edit_key(CaptureField::Thread, FormEditNavigation::Form, true, key) {
         intent @ Some(
-            BoardIntent::BeginAddStep
-            | BoardIntent::ConfirmEdit
+            BoardIntent::ConfirmEdit
             | BoardIntent::CancelEdit
             | BoardIntent::FormFocusNext
             | BoardIntent::FormFocusPrev,
@@ -1496,6 +1530,71 @@ fn altgr_text_char(key: &KeyEvent) -> Option<char> {
     }
 }
 
+/// A word chord every text field shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordChord {
+    Left,
+    Right,
+    DeleteLeft,
+    DeleteRight,
+}
+
+/// Classify the word chords: `ctrl+←/→` and `alt+←/→` move, `alt+b` / `alt+f` are the Meta
+/// spelling of the same motion (`Esc b` / `Esc f`, which many macOS terminals send for
+/// Option+arrow and crossterm reports as Alt, so a lone Esc still arrives on its own),
+/// `alt+Backspace` and `ctrl+w` delete the word before the cursor, `alt+Delete` and `alt+d`
+/// the word after it.
+///
+/// Alt chords require Alt alone (Shift aside) and `ctrl+w` Ctrl alone: Windows reports AltGr
+/// as Ctrl+Alt, so `AltGr+b`, `AltGr+d`, `AltGr+w` must stay text ([`altgr_text_char`]).
+/// Only these exact keys match, so `alt+↑` / `alt+↓` keep their own routes.
+fn word_chord(key: &KeyEvent) -> Option<WordChord> {
+    let mods = key.modifiers;
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let super_key = mods.contains(KeyModifiers::SUPER);
+    let alt_only = alt && !ctrl && !super_key;
+    match key.code {
+        KeyCode::Left if ctrl || alt_only => Some(WordChord::Left),
+        KeyCode::Right if ctrl || alt_only => Some(WordChord::Right),
+        KeyCode::Char('b') if alt_only => Some(WordChord::Left),
+        KeyCode::Char('f') if alt_only => Some(WordChord::Right),
+        KeyCode::Backspace if alt_only => Some(WordChord::DeleteLeft),
+        KeyCode::Char('w') if ctrl && !alt && !super_key => Some(WordChord::DeleteLeft),
+        KeyCode::Delete | KeyCode::Char('d') if alt_only => Some(WordChord::DeleteRight),
+        _ => None,
+    }
+}
+
+/// Line deletes in a text field: `ctrl+u` to line start (what macOS terminals such as Ghostty
+/// send for Cmd+Backspace) and `ctrl+k` to line end. Ctrl alone, so AltGr (Ctrl+Alt) letters
+/// keep typing. Outside text fields `ctrl+u` stays undo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineDelete {
+    ToStart,
+    ToEnd,
+}
+
+fn line_delete(key: &KeyEvent) -> Option<LineDelete> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        || key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('u') => Some(LineDelete::ToStart),
+        KeyCode::Char('k') => Some(LineDelete::ToEnd),
+        _ => None,
+    }
+}
+
+/// A one-line search query has no cursor: only deleting its last word applies.
+fn query_deletes_word(key: &KeyEvent) -> bool {
+    word_chord(key) == Some(WordChord::DeleteLeft)
+}
+
 /// Map one key for either kind of board form.
 ///
 /// Unlike standalone quick capture, board capture and task editing emit [`BoardIntent`]s. They
@@ -1512,9 +1611,21 @@ pub fn map_quick_add_key(key: KeyEvent) -> Option<BoardIntent> {
         KeyCode::Tab if mods.is_empty() => return Some(BoardIntent::ExpandQuickAdd),
         KeyCode::Char('a') if ctrl => return Some(BoardIntent::QuickAddMoveLineStart),
         KeyCode::Char('e') if ctrl => return Some(BoardIntent::QuickAddMoveLineEnd),
-        KeyCode::Left if ctrl => return Some(BoardIntent::QuickAddMoveWordLeft),
-        KeyCode::Right if ctrl => return Some(BoardIntent::QuickAddMoveWordRight),
         _ => {}
+    }
+    if let Some(delete) = line_delete(&key) {
+        return Some(match delete {
+            LineDelete::ToStart => BoardIntent::QuickAddDeleteToLineStart,
+            LineDelete::ToEnd => BoardIntent::QuickAddDeleteToLineEnd,
+        });
+    }
+    if let Some(chord) = word_chord(&key) {
+        return Some(match chord {
+            WordChord::Left => BoardIntent::QuickAddMoveWordLeft,
+            WordChord::Right => BoardIntent::QuickAddMoveWordRight,
+            WordChord::DeleteLeft => BoardIntent::QuickAddDeleteWordLeft,
+            WordChord::DeleteRight => BoardIntent::QuickAddDeleteWordRight,
+        });
     }
     if let Some(character) = altgr_text_char(&key) {
         return Some(BoardIntent::QuickAddInsert(character));
@@ -1621,23 +1732,35 @@ fn map_form_edit_key(
         KeyCode::Char('j') if ctrl && !alt && !super_key => {
             return Some(BoardIntent::ShiftEnterAsCtrlJ)
         }
-        KeyCode::Char('a') if ctrl && task_steps => return Some(BoardIntent::BeginAddStep),
+        // A text cursor owns ctrl+a as line start: macOS terminals send Cmd+← as ctrl+a, the
+        // partner of ctrl+e (Cmd+→). Only the cursorless Scope row keeps it as add-step.
+        KeyCode::Char('a') if ctrl && task_steps && focused == CaptureField::Scope => {
+            return Some(BoardIntent::BeginAddStep)
+        }
         KeyCode::Char('a') if ctrl && focused != CaptureField::Scope => {
             return Some(BoardIntent::EditMoveLineStart)
         }
         KeyCode::Char('e') if ctrl && focused != CaptureField::Scope => {
             return Some(BoardIntent::EditMoveLineEnd)
         }
-        KeyCode::Left if ctrl && focused != CaptureField::Scope => {
-            return Some(BoardIntent::EditMoveWordLeft)
-        }
-        KeyCode::Right if ctrl && focused != CaptureField::Scope => {
-            return Some(BoardIntent::EditMoveWordRight)
-        }
         _ => {}
     }
 
     if focused != CaptureField::Scope {
+        if let Some(delete) = line_delete(&key) {
+            return Some(match delete {
+                LineDelete::ToStart => BoardIntent::EditDeleteToLineStart,
+                LineDelete::ToEnd => BoardIntent::EditDeleteToLineEnd,
+            });
+        }
+        if let Some(chord) = word_chord(&key) {
+            return Some(match chord {
+                WordChord::Left => BoardIntent::EditMoveWordLeft,
+                WordChord::Right => BoardIntent::EditMoveWordRight,
+                WordChord::DeleteLeft => BoardIntent::EditDeleteWordLeft,
+                WordChord::DeleteRight => BoardIntent::EditDeleteWordRight,
+            });
+        }
         if let Some(character) = altgr_text_char(&key) {
             return Some(BoardIntent::EditInsert(character));
         }
@@ -1690,6 +1813,9 @@ fn map_form_edit_key(
 }
 
 fn map_search(key: KeyEvent) -> Option<BoardIntent> {
+    if query_deletes_word(&key) {
+        return Some(BoardIntent::SearchQueryDeleteWord);
+    }
     if let Some(character) = altgr_text_char(&key) {
         return Some(BoardIntent::SearchQueryInsert(character));
     }
@@ -1776,6 +1902,10 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::EditMoveLineEnd
         | BoardIntent::EditMoveWordLeft
         | BoardIntent::EditMoveWordRight
+        | BoardIntent::EditDeleteWordLeft
+        | BoardIntent::EditDeleteWordRight
+        | BoardIntent::EditDeleteToLineStart
+        | BoardIntent::EditDeleteToLineEnd
         | BoardIntent::ConfirmEdit
         | BoardIntent::ConfirmEditNext
         | BoardIntent::CancelEdit
@@ -1790,6 +1920,10 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::QuickAddMoveLineEnd
         | BoardIntent::QuickAddMoveWordLeft
         | BoardIntent::QuickAddMoveWordRight
+        | BoardIntent::QuickAddDeleteWordLeft
+        | BoardIntent::QuickAddDeleteWordRight
+        | BoardIntent::QuickAddDeleteToLineStart
+        | BoardIntent::QuickAddDeleteToLineEnd
         | BoardIntent::QuickAddSave
         | BoardIntent::QuickAddSaveNext
         | BoardIntent::ExpandQuickAdd
@@ -1825,9 +1959,11 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::ListPickerQueryInsert(_)
         | BoardIntent::ListPickerQueryInsertText(_)
         | BoardIntent::ListPickerQueryBackspace
+        | BoardIntent::ListPickerQueryDeleteWord
         | BoardIntent::SearchQueryInsert(_)
         | BoardIntent::SearchQueryInsertText(_)
         | BoardIntent::SearchQueryBackspace
+        | BoardIntent::SearchQueryDeleteWord
         | BoardIntent::FocusSearch
         | BoardIntent::PinSearch
         | BoardIntent::SelectProjectRow(_)
@@ -1843,12 +1979,14 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::CommandQueryInsert(_)
         | BoardIntent::CommandQueryInsertText(_)
         | BoardIntent::CommandQueryBackspace
+        | BoardIntent::CommandQueryDeleteWord
         | BoardIntent::PrimaryVerb
         | BoardIntent::ToggleBlock
         | BoardIntent::ToggleReview
         | BoardIntent::HelpQueryInsert(_)
         | BoardIntent::HelpQueryInsertText(_)
         | BoardIntent::HelpQueryBackspace
+        | BoardIntent::HelpQueryDeleteWord
         | BoardIntent::HelpScrollUp
         | BoardIntent::HelpScrollDown
         | BoardIntent::CloseHelp
@@ -2040,6 +2178,9 @@ fn map_help(key: KeyEvent) -> Option<BoardIntent> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(BoardIntent::Quit);
     }
+    if query_deletes_word(&key) {
+        return Some(BoardIntent::HelpQueryDeleteWord);
+    }
     if let Some(character) = altgr_text_char(&key) {
         return Some(BoardIntent::HelpQueryInsert(character));
     }
@@ -2090,6 +2231,9 @@ fn map_project_picker(key: KeyEvent) -> Option<BoardIntent> {
 /// Searchable list picker (thread filter / projects View). Printable keys narrow the
 /// query, arrows move, Enter applies, Esc cancels — the palette's contract with counts.
 fn map_list_picker(key: KeyEvent) -> Option<BoardIntent> {
+    if query_deletes_word(&key) {
+        return Some(BoardIntent::ListPickerQueryDeleteWord);
+    }
     if let Some(character) = altgr_text_char(&key) {
         return Some(BoardIntent::ListPickerQueryInsert(character));
     }
@@ -2134,6 +2278,9 @@ fn map_save_recovery(key: KeyEvent) -> Option<BoardIntent> {
 
 /// Palette: printable keys type the query, so movement stays on arrows and Tab.
 fn map_palette(key: KeyEvent) -> Option<BoardIntent> {
+    if query_deletes_word(&key) {
+        return Some(BoardIntent::CommandQueryDeleteWord);
+    }
     if let Some(character) = altgr_text_char(&key) {
         return Some(BoardIntent::CommandQueryInsert(character));
     }

@@ -143,6 +143,139 @@ impl EditBuffer {
             self.cursor = target;
         }
     }
+
+    /// remove the word before the cursor: any whitespace run, then the word before it.
+    ///
+    /// Words are the whitespace-separated runs word movement measures, but a deletion never
+    /// crosses a line break: it stops just after one, and a cursor right after a break (or
+    /// inside a `\r\n` pair) removes that whole break instead, as Backspace would.
+    pub(crate) fn delete_word_left(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let to = self.cursor;
+        if to == 0 {
+            return;
+        }
+        if to < chars.len() && chars[to - 1] == '\r' && chars[to] == '\n' {
+            self.remove_range(to - 1, to + 1);
+            return;
+        }
+        let from = if let Some(start) = break_ending_at(&chars, to) {
+            start
+        } else {
+            let mut from = to;
+            while from > 0 && chars[from - 1].is_whitespace() && !is_line_break(chars[from - 1]) {
+                from -= 1;
+            }
+            while from > 0 && !chars[from - 1].is_whitespace() {
+                from -= 1;
+            }
+            from
+        };
+        self.remove_range(from, to);
+    }
+
+    /// remove the word after the cursor: any whitespace run, then the word after it. The
+    /// mirror of [`Self::delete_word_left`], with the same line-break rule.
+    pub(crate) fn delete_word_right(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let from = self.cursor;
+        if from == chars.len() {
+            return;
+        }
+        if from > 0 && chars[from - 1] == '\r' && chars[from] == '\n' {
+            self.remove_range(from - 1, from + 1);
+            return;
+        }
+        let to = if is_line_break(chars[from]) {
+            if chars[from] == '\r' && chars.get(from + 1) == Some(&'\n') {
+                from + 2
+            } else {
+                from + 1
+            }
+        } else {
+            let mut to = from;
+            while to < chars.len() && chars[to].is_whitespace() && !is_line_break(chars[to]) {
+                to += 1;
+            }
+            while to < chars.len() && !chars[to].is_whitespace() {
+                to += 1;
+            }
+            to
+        };
+        self.remove_range(from, to);
+    }
+
+    /// remove from the start of the cursor's line up to the cursor; at a line start, remove
+    /// the break before it instead, joining the line to the one above (`\r\n` as one break).
+    /// A one-line field has no breaks, so this takes everything before the cursor.
+    pub(crate) fn delete_to_line_start(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let from = line_cursor(&chars, self.cursor);
+        let start = chars[..from]
+            .iter()
+            .rposition(|character| is_line_break(*character))
+            .map_or(0, |index| index + 1);
+        if start < from {
+            self.remove_range(start, from);
+        } else if let Some(break_start) = break_ending_at(&chars, from) {
+            self.remove_range(break_start, from);
+        }
+    }
+
+    /// remove from the cursor to the end of its line; at a line end, remove the break after
+    /// it instead, joining the next line on (`\r\n` as one break). A one-line field has no
+    /// breaks, so this takes everything after the cursor.
+    pub(crate) fn delete_to_line_end(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        // Inside a `\r\n` pair the cursor sits on the break itself: remove the pair whole.
+        if self.cursor > 0
+            && chars[self.cursor - 1] == '\r'
+            && chars.get(self.cursor) == Some(&'\n')
+        {
+            self.remove_range(self.cursor - 1, self.cursor + 1);
+            return;
+        }
+        let from = self.cursor;
+        let end = chars[from..]
+            .iter()
+            .position(|character| is_line_break(*character))
+            .map_or(chars.len(), |offset| from + offset);
+        if end > from {
+            self.remove_range(from, end);
+        } else if end < chars.len() {
+            let width = if chars[end] == '\r' && chars.get(end + 1) == Some(&'\n') {
+                2
+            } else {
+                1
+            };
+            self.remove_range(end, end + width);
+        }
+    }
+
+    /// Remove the characters in `from..to` and park the cursor at `from`.
+    fn remove_range(&mut self, from: usize, to: usize) {
+        let (start, end) = (self.byte_offset(from), self.byte_offset(to));
+        self.value.replace_range(start..end, "");
+        self.cursor = from;
+    }
+}
+
+/// The start of the line break that ends exactly at `position`, if one does: a `\r\n` pair
+/// counts as one break.
+fn break_ending_at(chars: &[char], position: usize) -> Option<usize> {
+    match chars[..position] {
+        [.., '\r', '\n'] => Some(position - 2),
+        [.., '\n' | '\r'] => Some(position - 1),
+        _ => None,
+    }
+}
+
+/// Drop the last word of a one-line query (trailing whitespace first), as `ctrl+w` does in a
+/// text field with the cursor at the end.
+pub(crate) fn delete_last_word(text: &mut String) {
+    let mut draft = seeded_draft(text);
+    draft.delete_word_left();
+    *text = draft.value().to_string();
 }
 
 /// per character: a line break is a `\r\n` pair, a lone `\n`, or a lone `\r`, so
@@ -684,8 +817,8 @@ pub(crate) fn place_edit_cursor_at(frame: &mut Frame, region: Rect, row: u16, co
 #[cfg(test)]
 mod tests {
     use super::{
-        escaped_draft_rows, field_viewport, seeded_draft, wrapped_draft_rows, wrapped_edit_rows,
-        EditBuffer,
+        delete_last_word, escaped_draft_rows, field_viewport, seeded_draft, split_line_breaks,
+        wrapped_draft_rows, wrapped_edit_rows, EditBuffer,
     };
     use ratatui::text::Line;
 
@@ -1366,6 +1499,217 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// word deletion removes the whitespace run and then the word in the asked direction.
+    #[test]
+    fn word_deletion_removes_the_adjacent_whitespace_then_the_word() {
+        let mut left = EditBuffer::new("alpha beta  gamma", 12);
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("alpha gamma", 6));
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("gamma", 0));
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("gamma", 0));
+
+        let mut mid_word = EditBuffer::new("alpha beta", 8);
+        mid_word.delete_word_left();
+        assert_eq!((mid_word.value(), mid_word.cursor()), ("alpha ta", 6));
+
+        let mut right = EditBuffer::new("alpha beta  gamma", 5);
+        right.delete_word_right();
+        assert_eq!((right.value(), right.cursor()), ("alpha  gamma", 5));
+        right.delete_word_right();
+        assert_eq!((right.value(), right.cursor()), ("alpha", 5));
+        right.delete_word_right();
+        assert_eq!((right.value(), right.cursor()), ("alpha", 5));
+    }
+
+    /// in multi-line notes a word deletion stops at a line break, and only a cursor right
+    /// beside one removes it, `\r\n` as a whole pair.
+    #[test]
+    fn word_deletion_stops_at_line_breaks_and_removes_a_crlf_whole() {
+        let mut left = EditBuffer::new("one\n  two", 9);
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("one\n  ", 6));
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("one\n", 4));
+        left.delete_word_left();
+        assert_eq!((left.value(), left.cursor()), ("one", 3));
+
+        let mut right = EditBuffer::new("one  \ntwo", 3);
+        right.delete_word_right();
+        assert_eq!((right.value(), right.cursor()), ("one\ntwo", 3));
+        right.delete_word_right();
+        assert_eq!((right.value(), right.cursor()), ("onetwo", 3));
+
+        for cursor in [4, 5] {
+            let mut crlf = EditBuffer::new("one\r\ntwo", cursor);
+            crlf.delete_word_left();
+            assert_eq!(
+                (crlf.value(), crlf.cursor()),
+                ("onetwo", 3),
+                "left from {cursor}"
+            );
+        }
+        for cursor in [3, 4] {
+            let mut crlf = EditBuffer::new("one\r\ntwo", cursor);
+            crlf.delete_word_right();
+            assert_eq!(
+                (crlf.value(), crlf.cursor()),
+                ("onetwo", 3),
+                "right from {cursor}"
+            );
+        }
+    }
+
+    /// at every position of the mixed-width value a word deletion removes one contiguous run
+    /// touching the cursor, never splits a `\r\n` pair, and crosses at most one break, which
+    /// it then removes alone.
+    #[test]
+    fn word_deletion_at_every_position_removes_one_whole_run_beside_the_cursor() {
+        let original: Vec<char> = MIXED.chars().collect();
+        let breaks = |text: &str| split_line_breaks(text).count();
+        for k in 0..=original.len() {
+            for (left, delete) in [
+                (true, EditBuffer::delete_word_left as Movement),
+                (false, EditBuffer::delete_word_right as Movement),
+            ] {
+                let mut buffer = EditBuffer::new(MIXED, k);
+                delete(&mut buffer);
+                let after: Vec<char> = buffer.value().chars().collect();
+                let removed = original.len() - after.len();
+                let from = buffer.cursor();
+                assert_eq!(
+                    [&original[..from], &original[from + removed..]].concat(),
+                    after,
+                    "not one contiguous run at {k}"
+                );
+                let run: String = original[from..from + removed].iter().collect();
+                // The run touches the cursor, or straddles it only inside a `\r\n` pair.
+                let pair = run == "\r\n";
+                if left {
+                    assert!(from + removed == k || pair, "left run apart from {k}");
+                } else {
+                    assert!(from == k || pair, "right run apart from {k}");
+                }
+                if run.contains(['\r', '\n']) {
+                    assert!(
+                        matches!(run.as_str(), "\r\n" | "\n" | "\r"),
+                        "run {run:?} crossed a break at {k}"
+                    );
+                }
+                assert!(
+                    breaks(buffer.value()) + 1 >= breaks(MIXED),
+                    "more than one break removed at {k}"
+                );
+                if k > 0 && k < original.len() && removed == 0 {
+                    panic!("nothing removed at interior position {k}");
+                }
+            }
+        }
+    }
+
+    /// a line delete takes the rest of the line in its direction; at the line's edge it removes
+    /// the break instead, joining the neighbouring line (`\r\n` as one break).
+    #[test]
+    fn line_deletes_clear_to_the_line_edge_then_join_lines() {
+        let mut start = EditBuffer::new("one\ntwo three", 8);
+        start.delete_to_line_start();
+        assert_eq!((start.value(), start.cursor()), ("one\nthree", 4));
+        start.delete_to_line_start();
+        assert_eq!((start.value(), start.cursor()), ("onethree", 3));
+        start.delete_to_line_start();
+        assert_eq!((start.value(), start.cursor()), ("three", 0));
+        start.delete_to_line_start();
+        assert_eq!((start.value(), start.cursor()), ("three", 0));
+
+        let mut end = EditBuffer::new("one two\nthree", 3);
+        end.delete_to_line_end();
+        assert_eq!((end.value(), end.cursor()), ("one\nthree", 3));
+        end.delete_to_line_end();
+        assert_eq!((end.value(), end.cursor()), ("onethree", 3));
+        end.delete_to_line_end();
+        assert_eq!((end.value(), end.cursor()), ("one", 3));
+        end.delete_to_line_end();
+        assert_eq!((end.value(), end.cursor()), ("one", 3));
+
+        // A one-line field: everything before / after the cursor.
+        let mut single = EditBuffer::new("fix the parser", 4);
+        single.delete_to_line_start();
+        assert_eq!((single.value(), single.cursor()), ("the parser", 0));
+        let mut single = EditBuffer::new("fix the parser", 4);
+        single.delete_to_line_end();
+        assert_eq!((single.value(), single.cursor()), ("fix ", 4));
+
+        // `\r\n` joins whole, from either side and from inside the pair.
+        for cursor in [4, 5] {
+            let mut crlf = EditBuffer::new("one\r\ntwo", cursor);
+            crlf.delete_to_line_start();
+            assert_eq!(
+                (crlf.value(), crlf.cursor()),
+                ("onetwo", 3),
+                "start from {cursor}"
+            );
+        }
+        for cursor in [3, 4] {
+            let mut crlf = EditBuffer::new("one\r\ntwo", cursor);
+            crlf.delete_to_line_end();
+            assert_eq!(
+                (crlf.value(), crlf.cursor()),
+                ("onetwo", 3),
+                "end from {cursor}"
+            );
+        }
+    }
+
+    /// at every position of the mixed-width value a line delete removes one run touching the
+    /// cursor that is either break-free or exactly one whole break.
+    #[test]
+    fn line_deletes_at_every_position_remove_one_run_or_one_whole_break() {
+        let original: Vec<char> = MIXED.chars().collect();
+        for k in 0..=original.len() {
+            for (left, delete) in [
+                (true, EditBuffer::delete_to_line_start as Movement),
+                (false, EditBuffer::delete_to_line_end as Movement),
+            ] {
+                let mut buffer = EditBuffer::new(MIXED, k);
+                delete(&mut buffer);
+                let after: Vec<char> = buffer.value().chars().collect();
+                let removed = original.len() - after.len();
+                let from = buffer.cursor();
+                assert_eq!(
+                    [&original[..from], &original[from + removed..]].concat(),
+                    after,
+                    "not one contiguous run at {k}"
+                );
+                let run: String = original[from..from + removed].iter().collect();
+                let pair = run == "\r\n";
+                if left {
+                    assert!(from + removed == k || pair, "start run apart from {k}");
+                } else {
+                    assert!(from == k || pair, "end run apart from {k}");
+                }
+                if run.contains(['\r', '\n']) {
+                    assert!(
+                        matches!(run.as_str(), "\r\n" | "\n" | "\r"),
+                        "run {run:?} crossed a break at {k}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// a query loses its trailing whitespace and last word together.
+    #[test]
+    fn deleting_the_last_word_of_a_query_takes_trailing_space_with_it() {
+        let mut query = String::from("fix parser  ");
+        delete_last_word(&mut query);
+        assert_eq!(query, "fix ");
+        delete_last_word(&mut query);
+        assert_eq!(query, "");
+        delete_last_word(&mut query);
+        assert_eq!(query, "");
     }
 
     /// a value that fits is windowed whole.

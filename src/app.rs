@@ -1183,12 +1183,14 @@ pub fn apply_board_intent_with_save_recovery(
             | BoardIntent::CommandQueryInsert(_)
             | BoardIntent::CommandQueryInsertText(_)
             | BoardIntent::CommandQueryBackspace
+            | BoardIntent::CommandQueryDeleteWord
             | BoardIntent::CloseCommandSurface
             | BoardIntent::OpenHelp
             | BoardIntent::CloseHelp
             | BoardIntent::HelpQueryInsert(_)
             | BoardIntent::HelpQueryInsertText(_)
             | BoardIntent::HelpQueryBackspace
+            | BoardIntent::HelpQueryDeleteWord
             | BoardIntent::HelpScrollUp
             | BoardIntent::HelpScrollDown
             | BoardIntent::CloseLayer
@@ -5506,6 +5508,14 @@ mod tests {
             BoardIntent::EditMoveLineEnd,
             BoardIntent::EditMoveWordLeft,
             BoardIntent::EditMoveWordRight,
+            BoardIntent::EditDeleteWordLeft,
+            BoardIntent::EditDeleteWordRight,
+            BoardIntent::EditDeleteToLineStart,
+            BoardIntent::EditDeleteToLineEnd,
+            BoardIntent::QuickAddDeleteWordLeft,
+            BoardIntent::QuickAddDeleteWordRight,
+            BoardIntent::QuickAddDeleteToLineStart,
+            BoardIntent::QuickAddDeleteToLineEnd,
             BoardIntent::CancelEdit,
         ] {
             assert!(
@@ -6301,6 +6311,58 @@ mod tests {
             model.message(),
             Some("save or cancel edits before switching tasks")
         );
+    }
+
+    /// The palette and Help stay usable over a failed save, so their query edits, the word
+    /// delete included, pass the recovery gate instead of re-raising the failure banner.
+    #[test]
+    fn query_word_deletes_pass_the_save_recovery_gate() {
+        let mut domain = DomainState::new();
+        let mut model = BoardModel::from_domain(&domain, None);
+        let mut recovery = SaveRecovery::new();
+        recovery.fail(DomainState::new(), DomainState::new(), "save failed");
+        model.begin_save_recovery("save failed");
+        let mut run = |domain: &mut DomainState, model: &mut BoardModel, intent: BoardIntent| {
+            apply_board_intent_with_save_recovery(
+                domain,
+                model,
+                &mut recovery,
+                BoardSaveContext {
+                    baseline: DomainState::new(),
+                    intent,
+                    snapshot: None,
+                },
+                |_| Ok(()),
+            )
+            .expect("intent over recovery");
+        };
+
+        run(&mut domain, &mut model, BoardIntent::OpenCommandPalette);
+        assert_eq!(model.input_mode(), BoardInputMode::Palette);
+        for character in "new task".chars() {
+            run(
+                &mut domain,
+                &mut model,
+                BoardIntent::CommandQueryInsert(character),
+            );
+        }
+        run(&mut domain, &mut model, BoardIntent::CommandQueryDeleteWord);
+        assert_eq!(model.input_mode(), BoardInputMode::Palette);
+        assert_eq!(model.command_query(), "new ");
+        run(&mut domain, &mut model, BoardIntent::CloseCommandSurface);
+
+        run(&mut domain, &mut model, BoardIntent::OpenHelp);
+        assert_eq!(model.input_mode(), BoardInputMode::Help);
+        for character in "word left".chars() {
+            run(
+                &mut domain,
+                &mut model,
+                BoardIntent::HelpQueryInsert(character),
+            );
+        }
+        run(&mut domain, &mut model, BoardIntent::HelpQueryDeleteWord);
+        assert_eq!(model.input_mode(), BoardInputMode::Help);
+        assert_eq!(model.help_query(), "word ");
     }
 
     #[test]

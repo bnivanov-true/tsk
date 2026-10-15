@@ -98,14 +98,21 @@ fn plus_opens_focused_bar_regardless_of_shift_and_legacy_chord_is_unbound() {
     assert_eq!(model.message(), None);
 }
 
+/// In the expanded draft a focused Title has a cursor, so ctrl+a is line start (Cmd+← on
+/// macOS); the cursorless capture page (a selected step or `+ step`) still adds a step.
 #[test]
-fn expanded_capture_ctrl_a_opens_step_add() {
+fn expanded_capture_ctrl_a_is_line_start_in_a_field_and_adds_a_step_from_the_page() {
+    let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
     assert_eq!(
         tsk_tui::ui::input::map_task_form_key(
             tsk_tui::ui::capture::CaptureField::Title,
             false,
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            ctrl_a,
         ),
+        Some(BoardIntent::EditMoveLineStart)
+    );
+    assert_eq!(
+        tsk_tui::ui::input::map_key(BoardInputMode::CapturePage, ctrl_a),
         Some(BoardIntent::BeginAddStep)
     );
     let mut domain = DomainState::new();
@@ -1143,7 +1150,7 @@ fn capture_bar_renders_spaced_three_row_block_and_stays_bounded_without_color_sg
         "visible task",
         "title…   !p = desk · !p name = project · !t name = thread",
         "add to invocation",
-        "enter save · tab details · esc close",
+        "enter save · tab notes · esc close",
     ] {
         assert!(standard.contains(text), "missing {text:?}: {standard}");
     }
@@ -1517,4 +1524,32 @@ fn wrapped_draft_refusal_paints_on_the_verb_row_and_a_click_there_keeps_the_draf
         BoardInputMode::QuickAdd,
         "the draft survives"
     );
+}
+
+/// GitHub #204: the quick-add line takes the macOS word keys like every text field.
+#[test]
+fn quick_add_line_deletes_and_moves_by_word() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tsk_tui::ui::input::map_key;
+
+    let mut domain = DomainState::new();
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from("/repos/invocation")));
+    let snap = snapshot();
+    open(&mut domain, &mut model, &snap);
+    type_title(&mut domain, &mut model, "ship the fix");
+
+    let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
+    for key in [
+        alt(KeyCode::Left),
+        alt(KeyCode::Backspace),
+        alt(KeyCode::Char('d')),
+    ] {
+        let intent = map_key(model.input_mode(), key).expect("mapped");
+        apply(&mut domain, &mut model, intent, None);
+    }
+    assert_eq!(model.quick_add_title_value(), "ship ");
+    let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+    let intent = map_key(model.input_mode(), ctrl_w).expect("mapped");
+    apply(&mut domain, &mut model, intent, None);
+    assert_eq!(model.quick_add_title_value(), "");
 }

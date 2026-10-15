@@ -92,21 +92,26 @@ Click a step to select it. Click **+ step** to add at the end. Field clicks beco
 | Cancel field | `Esc` or `ctrl+c` |
 | Move from Title to Notes | `Enter` in Title |
 | New line | `Enter` in Notes |
-| Add another step | `ctrl+a` on the task page |
+| Add another step | `ctrl+a` with no text field open, or `Enter` in a new step |
 | Save new step and open next empty row | `Enter` in new step |
 | Retain existing-step rename in session | `Enter` in existing step |
 | Stage selected-step removal | `ctrl+x` in task edit |
 | Open Scope picker / confirm selection | `Enter` |
 | Cycle Scope | `Space` or `←` / `→` |
 | Open / close selected Thread editor | `Enter` |
-| Line start / end | `Home` / `End` |
-| Word left / right | `ctrl+←` / `ctrl+→` |
+| Line start / end | `Home` / `End`, or `ctrl+a` / `ctrl+e` (what macOS terminals send for `Cmd+←` / `Cmd+→`) |
+| Word left / right | `ctrl+←` / `ctrl+→`, or `alt+←` / `alt+→` (Option on macOS; also `Esc b` / `Esc f`) |
 | Delete backward / forward | `Backspace` / `Delete` |
+| Delete word backward | `alt+Backspace` or `ctrl+w` |
+| Delete word forward | `alt+Delete` or `alt+d` |
+| Delete to line start / end | `ctrl+u` / `ctrl+k` (macOS terminals send `Cmd+Backspace` as `ctrl+u`) |
 | Move through wrapped notes | `↑` / `↓` |
 
-`ctrl+e` moves to line end in text editors. `ctrl+a` moves to line start in quick-add; on the task page it adds a step instead. Paste preserves line breaks in Notes and converts them to spaces in single-line fields.
+Every text field takes the word keys: Title, Notes, steps, Thread, and the quick-add line and draft. A word is a run of non-space characters; deleting a word also takes the spaces between it and the cursor. In Notes a word delete stops at a line break, and the next press removes the break. Search, the palette, Help, and pickers have no cursor, so `alt+Backspace` and `ctrl+w` drop the query's last word there. On Windows, AltGr letters still type as characters. On macOS the Option keys reach tsk only when the terminal sends Option as Meta: Terminal.app's **Use Option as Meta key**, or iTerm2's Option key set to **Esc+**. If Option+B types `∫` instead, use `ctrl+←` / `ctrl+→` and `ctrl+w`. While Notes is focused the footer shows `enter new line`.
 
-Editing keys take precedence over view-mode status shortcuts. In the step editor, `ctrl+d` and `ctrl+o` still address the task; `ctrl+x` removes the step being edited, staged until the task edit is saved; `ctrl+a` adds another step. Notes are reached with `ctrl+e`, then `Tab`. `Alt+Enter` does not save the task edit.
+`ctrl+a` and `ctrl+e` move to line start and end in every text field: Title, Notes, Thread, a step editor, and quick-add. `ctrl+a` adds a step only where no text cursor is open: task page view, a selected step or **+ step**, the Scope row, or a selected Thread. `ctrl+u` deletes from the cursor to the line start and `ctrl+k` to the line end; in Notes, `ctrl+u` at the start of a line joins it to the line above and `ctrl+k` at the end of a line joins the next one. In a one-line field they take everything before or after the cursor. Outside text fields `ctrl+u` is still undo; search, the palette, Help, and pickers leave both keys alone. Paste preserves line breaks in Notes and converts them to spaces in single-line fields.
+
+Editing keys take precedence over view-mode status shortcuts. In the step editor, `ctrl+d` and `ctrl+o` still address the task; `ctrl+x` removes the step being edited, staged until the task edit is saved; `Enter` in a new step saves it and opens the next row. Notes are reached with `ctrl+e`, then `Tab`. `Alt+Enter` does not save the task edit.
 
 ### If Shift+Enter does not save
 
@@ -118,7 +123,7 @@ Some terminals are set to send a plain line feed for `Shift+Enter` (Ghostty's `k
 | --- | --- |
 | Save and close | `Enter` |
 | Save and keep adding | `Shift+Enter` |
-| Expand details | `Tab` |
+| Add notes and details | `Tab` (the footer shows `tab notes`) |
 | Cancel line / return from details | `Esc` |
 
 In Herdr quick capture, `Shift+Enter` saves and closes the popup. `Esc` closes an active step editor or scope picker first; otherwise it discards the popup. During save recovery, it cancels the pending save. [Capture guide](/docs/capture/).
