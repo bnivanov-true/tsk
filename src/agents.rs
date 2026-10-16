@@ -144,6 +144,19 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 # sort = "recent"
 # project_group = "thread"
 # project_sort = "title"
+
+# --- Backups ------------------------------------------------------------------
+
+# Copies of tsk.json and this file to a git repository. `tsk backup setup`
+# makes a private GitHub repository with the GitHub CLI and adds it; `tsk
+# backup add <git-url>` adds any other repository. Both write these entries and
+# run a first backup; `tsk backup list` shows how each went; `tsk restore` puts a
+# version back. tsk uses your own `git` and its credentials. Backups hold your
+# task notes, so keep the repository private.
+#   every  "save" (the default) or "daily"
+# [[backup]]
+# url = "git@github.com:you/tsk-backup.git"
+# every = "save"
 "##;
 
 /// Seed the commented profile examples on a full board open.
@@ -206,6 +219,36 @@ fn unique_tmp_path(dir: &Path) -> PathBuf {
     ))
 }
 
+/// `<state_dir>/config.toml`'s text, `None` when the file does not exist.
+pub(crate) fn read_config(state_dir: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(state_dir.join(CONFIG_FILE)) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Replace `<state_dir>/config.toml` with `content`: a private, synced temp file renamed over
+/// the target, so a reader sees the old file or the new one, never a torn one.
+pub(crate) fn write_config(state_dir: &Path, content: &str) -> io::Result<()> {
+    crate::fsperm::ensure_private_dir(state_dir)?;
+    let tmp = unique_tmp_path(state_dir);
+    let result = (|| -> io::Result<()> {
+        let mut temp_file = create_private_temp(&tmp)?;
+        temp_file.write_all(content.as_bytes())?;
+        temp_file.sync_all()?;
+        drop(temp_file);
+        crate::fsperm::replace_file(&tmp, &state_dir.join(CONFIG_FILE))?;
+        #[cfg(not(windows))]
+        fs::File::open(state_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Prompt used by a profile that does not define its own template. It assumes a git
 /// worktree, which dispatch guarantees (non-git projects refuse before rendering).
 pub const DEFAULT_PROMPT: &str = "You were dispatched to T{number} ({title}) in worktree {worktree} on branch {branch}, based on {base}.
@@ -263,6 +306,12 @@ impl AgentProfiles {
             profiles.insert(name.to_string(), parse_profile(name, table)?);
         }
         Ok(Self { profiles })
+    }
+
+    /// Whether `content` parses as profiles (tests of other modules).
+    #[cfg(test)]
+    pub(crate) fn parse_for_tests(content: &str) -> bool {
+        Self::parse(content).is_ok()
     }
 
     pub fn get(&self, name: &str) -> Option<&AgentProfile> {

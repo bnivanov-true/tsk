@@ -131,7 +131,27 @@ fn load_board_inner(
         }
         Err(error) => Some(error.to_string()),
     };
-    if let Some(message) = profiles_error.or(board_error) {
+    let backup_error = if full_board_open {
+        crate::backup::after_open(&state_dir);
+        // Shown on every full open until the target succeeds; nothing is marked shown, so a
+        // profile or `[board]` error that wins the row this time loses nothing.
+        crate::backup::failure_message(&state_dir)
+    } else {
+        None
+    };
+    // The first-backup suggestion is recorded as shown, so it is taken only when nothing
+    // else wants the status row.
+    let message = profiles_error.or(board_error).or(backup_error).or_else(|| {
+        let tasks = state
+            .tasks()
+            .iter()
+            .filter(|task| !task.is_notice() && !task.soft_deleted)
+            .count();
+        full_board_open
+            .then(|| crate::backup::take_backup_nudge(&state_dir, tasks))
+            .flatten()
+    });
+    if let Some(message) = message {
         model.set_message(message);
     }
     if full_board_open {
@@ -307,6 +327,7 @@ pub fn quick_capture_finished(model: &BoardModel) -> bool {
 /// The popup lives exactly as long as that draft: a persisted save closes it, an
 /// explicit discard closes it, and a failed save keeps it open in recovery.
 fn run_capture() -> Result<(), Box<dyn Error>> {
+    let _presence = hold_board_presence();
     let (store, mut domain, mut model) = load_board_for_quick_capture()?;
     let snapshot = load_snapshot(&domain);
     seed_quick_capture(&mut domain, &mut model, &snapshot);
@@ -314,9 +335,19 @@ fn run_capture() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_board() -> Result<(), Box<dyn Error>> {
+    let _presence = hold_board_presence();
     let (store, domain, model) = load_board()?;
     crate::git_base::remember_fetches_in(store.path());
     run_board_loop(store, domain, model, false)
+}
+
+/// Held for the whole session, taken before the first load, so `tsk restore` refuses while
+/// this process could still write back tasks the restored store no longer holds. Best effort:
+/// a store that cannot take the lock still opens.
+fn hold_board_presence() -> Option<crate::store::BoardPresence> {
+    TaskStore::new(default_state_dir())
+        .hold_board_presence()
+        .ok()
 }
 
 fn run_board_loop(
