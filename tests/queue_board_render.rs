@@ -238,7 +238,7 @@ fn fixture_verbs() -> &'static [VerbEntry<'static>] {
 /// Imp-A (round 3 finding): a **Todo**-selected model, so `board_verb_items` yields six
 /// entries (`s start` plus the base five) instead of the Doing selection's five. Used
 /// only where the trim-the-sixth path needs a budget-5 bar to actually drop an entry --
-/// `fixture_verbs()`'s Doing selection is exactly 5 against a budget of 5, so `take(5)`
+/// `fixture_verbs()`'s Doing selection is exactly 5 against a budget of 5, so the budget
 /// never drops anything and a test built on it can't fail.
 fn todo_verbs() -> Vec<VerbEntry<'static>> {
     let mut model = base_board_model();
@@ -1265,7 +1265,7 @@ fn compact_77x24_and_48x19_and_40x10_paint_glyph_title_only_rows_and_leq_5_verb_
     let view = fixture_view(&tasks, false);
     // Imp-A: a Todo selection gives `board_verb_items` six entries (`s start` plus the
     // base five), so the budget-5 trim below is genuinely exercised -- the Doing selection
-    // `fixture_model` otherwise uses yields exactly five, which `take(5)` never trims.
+    // `fixture_model` otherwise uses yields exactly five, which the budget never trims.
     let verbs = todo_verbs();
     let model = QueueFrameModel {
         verb_items: &verbs,
@@ -4139,10 +4139,17 @@ fn step_editor_bar_falls_back_to_short_labels_when_narrow() {
         wide.contains("enter save step · shift+enter save all · esc cancel"),
         "a wide bar names the whole action:\n{wide}"
     );
-    let narrow = step_bar(40);
+    let middling = step_bar(50);
     assert!(
-        narrow.contains("enter step · shift+enter save · esc"),
-        "a narrow bar falls back to the short labels:\n{narrow}"
+        middling.contains("enter step · shift+enter save · esc cancel"),
+        "a narrower bar falls back to the short labels:\n{middling}"
+    );
+    // T252: where even short labels overflow, `shift+enter save all` leaves whole and the
+    // full words come back for what stays.
+    let narrow = step_bar(40);
+    assert_eq!(
+        narrow, " enter save step · esc cancel",
+        "a narrow bar drops a whole entry, never cuts one"
     );
 }
 
