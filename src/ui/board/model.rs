@@ -1516,6 +1516,9 @@ pub struct BulkCleanup {
     /// on `y` or `n` they converge to cleaned only if that same record is still current and
     /// its worktree is still gone.
     pub missing: Vec<(Uuid, String, crate::domain::Dispatch)>,
+    /// The `missing` targets whose agent pane (Herdr workspace) was still open: `y` and `m`
+    /// close it.
+    pub missing_panes: Vec<String>,
     /// Dispatched targets whose worktree could not be inspected, with the reason: kept, still
     /// marked done by `y` and `n`; `m` leaves them unchanged.
     pub refused: Vec<(Uuid, String, String)>,
@@ -1841,6 +1844,12 @@ pub enum CleanupRowState {
     /// Removed. `branch_kept` holds the short and full reason the branch stayed, if it did.
     Cleaned {
         branch_kept: Option<(String, String)>,
+        /// The worktree was already gone when the worker reached it.
+        worktree_gone: bool,
+        /// That gone worktree's workspace, still open: closed (`Ok`), or why Herdr kept it.
+        workspace: Option<Result<(), String>>,
+        /// The cleanup's fetch warning.
+        warning: Option<String>,
     },
     /// Left in place, with a short reason for the status row and a full one for the card.
     Kept {
@@ -1850,6 +1859,16 @@ pub enum CleanupRowState {
 }
 
 impl CleanupRowState {
+    /// Removed, with nothing else to say but the branch.
+    pub fn cleaned(branch_kept: Option<(String, String)>) -> Self {
+        Self::Cleaned {
+            branch_kept,
+            worktree_gone: false,
+            workspace: None,
+            warning: None,
+        }
+    }
+
     /// A worktree the cleanup left in place. The card leads with `kept:`, so the full reason
     /// is the bare one, never the CLI line that already carries it.
     pub fn kept(error: &crate::dispatch::CleanupError) -> Self {
@@ -1863,13 +1882,22 @@ impl CleanupRowState {
         matches!(self, Self::Cleaned { .. } | Self::Kept { .. })
     }
 
-    /// Anything the user should not miss: a kept worktree or a kept branch.
+    /// Anything the user should not miss: a kept worktree, branch, or workspace, or a warning.
     fn exception(&self) -> bool {
         matches!(
             self,
             Self::Kept { .. }
                 | Self::Cleaned {
-                    branch_kept: Some(_)
+                    branch_kept: Some(_),
+                    ..
+                }
+                | Self::Cleaned {
+                    workspace: Some(Err(_)),
+                    ..
+                }
+                | Self::Cleaned {
+                    warning: Some(_),
+                    ..
                 }
         )
     }
@@ -1913,6 +1941,9 @@ pub struct CleanupRun {
     /// Tasks the card left exactly as they were, with why (gh's reason, uncommitted files,
     /// not merged under `m`).
     pub unmerged: Vec<(String, String)>,
+    /// A marked set's tasks whose worktree was already gone and whose workspace was still
+    /// open: closed once the completion saved, or why it stayed open.
+    pub workspaces: Vec<(String, Result<(), String>)>,
 }
 
 /// One pull request a cleanup card's `m` merged.
@@ -1994,14 +2025,31 @@ impl CleanupRun {
             parts.push(format!("merged {}", merged.pr));
         }
         match &row.state {
-            CleanupRowState::Cleaned { branch_kept } => {
+            CleanupRowState::Cleaned {
+                branch_kept,
+                worktree_gone,
+                workspace,
+                warning,
+            } => {
                 if self.bulk.is_some() {
                     parts.push("done".into());
                 }
-                parts.push("cleaned".into());
-                if let Some((short, _)) = branch_kept {
-                    parts.push(format!("branch kept ({short})"));
+                parts.push(if *worktree_gone {
+                    "worktree already gone".into()
+                } else {
+                    "cleaned".into()
+                });
+                match workspace {
+                    Some(Ok(())) => parts.push("workspace closed".into()),
+                    Some(Err(why)) => parts.push(why.clone()),
+                    None => {}
                 }
+                match branch_kept {
+                    Some(_) if *worktree_gone => parts.push("branch kept".into()),
+                    Some((short, _)) => parts.push(format!("branch kept ({short})")),
+                    None => {}
+                }
+                parts.extend(warning.clone());
             }
             CleanupRowState::Kept { full, .. } => {
                 if self.bulk.is_some() {
@@ -2049,7 +2097,9 @@ impl CleanupRun {
     }
 
     fn cleanup_summary(&self) -> (String, bool) {
-        let clean = self.refused.is_empty() && !self.rows.iter().any(|row| row.state.exception());
+        let clean = self.refused.is_empty()
+            && !self.rows.iter().any(|row| row.state.exception())
+            && self.workspaces.iter().all(|(_, closed)| closed.is_ok());
         let Some((done, missing)) = self.bulk else {
             let Some(row) = self.rows.first() else {
                 return ("done".into(), true);
@@ -2089,9 +2139,29 @@ impl CleanupRun {
             .filter_map(|row| match &row.state {
                 CleanupRowState::Cleaned {
                     branch_kept: Some((short, _)),
+                    ..
                 } => Some(format!("T{} ({short})", row.number)),
                 _ => None,
             })
+            .collect::<Vec<_>>();
+        // Gone worktrees' workspaces: the card's missing rows, then rows the worker found gone.
+        let gone = self
+            .workspaces
+            .iter()
+            .map(|(identifier, closed)| (identifier.clone(), closed.is_ok()))
+            .chain(self.rows.iter().filter_map(|row| match &row.state {
+                CleanupRowState::Cleaned {
+                    workspace: Some(closed),
+                    ..
+                } => Some((format!("T{}", row.number), closed.is_ok())),
+                _ => None,
+            }))
+            .collect::<Vec<_>>();
+        let closed = gone.iter().filter(|(_, closed)| *closed).count();
+        let open = gone
+            .iter()
+            .filter(|(_, closed)| !closed)
+            .map(|(identifier, _)| identifier.as_str())
             .collect::<Vec<_>>();
         let build = |named: bool| {
             let mut parts = vec![format!("done {done}")];
@@ -2114,6 +2184,23 @@ impl CleanupRun {
             }
             if missing > 0 {
                 parts.push(format!("{missing} already gone"));
+            }
+            if closed > 0 {
+                parts.push(format!(
+                    "{closed} {} closed",
+                    if closed == 1 {
+                        "workspace"
+                    } else {
+                        "workspaces"
+                    }
+                ));
+            }
+            if !open.is_empty() {
+                parts.push(if named {
+                    format!("workspace kept {}", open.join(", "))
+                } else {
+                    format!("workspace kept {}", open.len())
+                });
             }
             parts.join(" · ")
         };
@@ -7327,7 +7414,7 @@ mod tests {
     }
 
     fn cleaned() -> CleanupRowState {
-        CleanupRowState::Cleaned { branch_kept: None }
+        CleanupRowState::cleaned(None)
     }
 
     fn kept(short: &str) -> CleanupRowState {
@@ -7350,6 +7437,7 @@ mod tests {
             started: true,
             merged: Vec::new(),
             unmerged: Vec::new(),
+            workspaces: Vec::new(),
         }
     }
 
@@ -7379,9 +7467,10 @@ mod tests {
                 run_row(156, cleaned()),
                 run_row(
                     157,
-                    CleanupRowState::Cleaned {
-                        branch_kept: Some(("not merged".into(), "not merged into main".into())),
-                    },
+                    CleanupRowState::cleaned(Some((
+                        "not merged".into(),
+                        "not merged into main".into(),
+                    ))),
                 ),
             ],
             Some((2, 0)),
