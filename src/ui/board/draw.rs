@@ -1062,14 +1062,14 @@ fn build_task_page_overlay<'a>(
     let mut meta = String::new();
     let capture_form = !form.is_task();
     let shown_assignee = if capture_form || (form.is_task() && form.editing) {
-        form.assignee.as_deref()
+        form.assignee.as_ref().map(|assignee| assignee.name.clone())
     } else {
-        bound_task.and_then(|task| task.assignee.as_deref())
+        bound_task.and_then(|task| task.assignee.clone())
     };
     // View mode offers the quick picker on an unassigned task: a clickable `+ assign` in the
     // assignee slot, but only when a profile exists to choose. The peek never paints it.
     let assignee_segment = shown_assignee
-        .map(|assignee| format!("@{}", terminal_text(assignee)))
+        .map(|assignee| render::assignee_handle(&assignee))
         .or_else(|| {
             (capture_form || (form.is_task() && form.editing)).then(|| "assignee".to_string())
         })
@@ -1641,7 +1641,6 @@ fn block_page_rows(
     task: &crate::domain::Task,
     width: usize,
 ) -> BlockPageRows {
-    use crate::domain::OWNER;
     use crate::ui::board::BlockTarget;
     use render::{BlockPageRow, BlockRowKind};
 
@@ -1774,20 +1773,14 @@ fn block_page_rows(
     }
 
     // The thread: `name · age` in one column wide enough for every lead, the text beside it.
-    let name = |by: &str| {
-        if by == OWNER {
-            OWNER.to_string()
-        } else {
-            by.to_string()
-        }
-    };
+    // Your replies carry your `[board] me` name, as the paper trail does.
     let leads: Vec<String> = block
         .replies
         .iter()
         .map(|reply| {
             let mut lead = format!(
                 "{} · {}",
-                name(&reply.by),
+                crate::domain::display_name(&reply.by),
                 render::format_age(now, reply.at)
             );
             if reply.edited && !reply.deleted {
@@ -1798,10 +1791,11 @@ fn block_page_rows(
         .collect();
     let editor = form.block.reply.as_ref().filter(|_| own);
     let editor_lead = editor.map(|editor| {
+        let owner = crate::domain::owner_name();
         if editor.edit.is_some() {
-            format!("{OWNER} · edit")
+            format!("{owner} · edit")
         } else {
-            OWNER.to_string()
+            owner
         }
     });
     let column = leads
@@ -1924,7 +1918,7 @@ fn section_action_keys(
         Some("enter add step")
     } else {
         match selected {
-            Some(BlockTarget::Heading) => Some("ctrl+e edit"),
+            Some(BlockTarget::Heading) => Some("enter set waiting on · ctrl+e edit"),
             Some(BlockTarget::Option(_)) => Some("enter choose"),
             Some(BlockTarget::Check(_)) => Some("enter cycle check"),
             Some(BlockTarget::PassedFold) if form.block.passed_open => Some("enter hide passed"),
@@ -2113,7 +2107,7 @@ fn nav_paint(model: &BoardModel) -> NavPaint {
             optional: false,
         }),
         (BoardLocation::Projects, ProjectsView::Assignee(name)) => Some(NavChipPaint {
-            label: format!("@{name}"),
+            label: render::assignee_handle(name),
             kind: NavChipKind::ProjectsView,
             optional: false,
         }),
@@ -2243,7 +2237,13 @@ impl OverlayPayloads {
                     .map(|form| {
                         form.assignee_options
                             .iter()
-                            .map(|option| option.clone().unwrap_or_else(|| "none".to_string()))
+                            .map(|option| match option {
+                                Some(assignee) if assignee.is_person() => {
+                                    crate::domain::display_name(&assignee.name)
+                                }
+                                Some(assignee) => assignee.name.clone(),
+                                None => "none".to_string(),
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -2421,6 +2421,7 @@ impl OverlayPayloads {
             let title = match model.list_picker_kind() {
                 Some(crate::ui::board::ListPickerKind::ProjectsView) => "view",
                 Some(crate::ui::board::ListPickerKind::Assignee) => "assignee",
+                Some(crate::ui::board::ListPickerKind::WaitingOn) => "waiting on",
                 Some(crate::ui::board::ListPickerKind::Base) => "base",
                 Some(crate::ui::board::ListPickerKind::GroupBy) => "group by",
                 Some(crate::ui::board::ListPickerKind::SortBy) => "sort by",
