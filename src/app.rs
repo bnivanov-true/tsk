@@ -1218,6 +1218,24 @@ fn board_keyboard_intent(
             _ => {}
         }
     }
+    // The task picker's own keys: `Enter` pins or unpins, `ctrl+x` unpins every task, and
+    // `shift+Enter` saves, with the task page's `ctrl+j` hint for a terminal that sends it.
+    if mode == BoardInputMode::ListPicker
+        && model.list_picker_kind() == Some(crate::ui::board::ListPickerKind::After)
+    {
+        match (key.code, key.modifiers) {
+            (KeyCode::Enter, KeyModifiers::NONE) => return Some(BoardIntent::AfterPickerPin),
+            (KeyCode::Enter, KeyModifiers::SHIFT) => return Some(BoardIntent::ConfirmListPicker),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                return Some(BoardIntent::AfterPickerClear)
+            }
+            (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                return Some(BoardIntent::ShiftEnterAsCtrlJ)
+            }
+            (KeyCode::Enter, _) => return None,
+            _ => {}
+        }
+    }
     // Bare `w` on a page showing its BLOCKED or REVIEW section opens the waiting-on picker
     // wherever the cursor rests, like `Enter` on the top line.
     if mode == BoardInputMode::TaskPage
@@ -20660,8 +20678,102 @@ mod quick_assign_tests {
             .all(|id| disk.get(*id).expect("task").after.is_empty()));
     }
 
+    /// Paste `text` into the open picker's query (a pasted space types, never pins).
+    fn paste_query(temp: &Temp, domain: &mut DomainState, model: &mut BoardModel, text: &str) {
+        let mut host = fake_host(temp);
+        handle(
+            temp,
+            domain,
+            model,
+            BoardIntent::ListPickerQueryInsertText(text.to_string()),
+            &mut host,
+        );
+    }
+
+    /// What a key does on the open board, with the model in reach (the task picker's own keys).
+    fn picker_key(model: &BoardModel, code: KeyCode, modifiers: KeyModifiers) -> BoardIntent {
+        board_keyboard_intent(model, model.input_mode(), KeyEvent::new(code, modifiers))
+            .expect("mapped key")
+    }
+
     #[test]
-    fn the_task_picker_ticks_several_and_refuses_a_loop() {
+    fn the_task_picker_keys() {
+        let temp = Temp::new("after-keys", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second"]);
+        let mut host = fake_host(&temp);
+        select(&mut domain, &mut model, ids[1]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        for (code, modifiers, intent) in [
+            (
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                BoardIntent::AfterPickerPin,
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::SHIFT,
+                BoardIntent::ConfirmListPicker,
+            ),
+            (
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                BoardIntent::AfterPickerClear,
+            ),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                BoardIntent::ShiftEnterAsCtrlJ,
+            ),
+            (
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                BoardIntent::ListPickerQueryInsert(' '),
+            ),
+            (
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                BoardIntent::CancelListPicker,
+            ),
+        ] {
+            assert_eq!(
+                picker_key(&model, code, modifiers),
+                intent,
+                "{code:?} {modifiers:?}"
+            );
+        }
+        // A typed space searches: `login timeout` is two words of one query.
+        for character in "rst fi".chars() {
+            let intent = picker_key(&model, KeyCode::Char(character), KeyModifiers::NONE);
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+        }
+        assert_eq!(model.list_picker_query(), Some("rst fi"));
+        assert_eq!(
+            picker_labels(&model),
+            vec![format!("T{} first", number_of(&domain, ids[0]))]
+        );
+        // ctrl+j is a terminal sending Shift+Enter as Ctrl+J: the hint, no save.
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ShiftEnterAsCtrlJ,
+            &mut host,
+        );
+        assert_eq!(model.list_picker_kind(), Some(ListPickerKind::After));
+        assert_eq!(
+            model.message(),
+            Some(crate::ui::board::SHIFT_ENTER_AS_CTRL_J_HINT)
+        );
+    }
+
+    #[test]
+    fn the_task_picker_searches_pins_several_and_refuses_a_loop() {
         let temp = Temp::new("after-picker", &["builder"]);
         let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
         let mut host = fake_host(&temp);
@@ -20675,38 +20787,54 @@ mod quick_assign_tests {
             &mut host,
         );
         assert_eq!(model.list_picker_kind(), Some(ListPickerKind::After));
-        let labels: Vec<String> = model
-            .visible_list_picker_options()
-            .into_iter()
-            .map(|(_, option)| option.label)
-            .collect();
         assert_eq!(
-            labels,
+            model.after_picker_title(),
+            Some(format!("T{} runs after", n(&domain, 1)).as_str())
+        );
+        assert!(
+            picker_labels(&model).is_empty(),
+            "an empty query lists no tasks"
+        );
+        paste_query(&temp, &mut domain, &mut model, "i");
+        assert_eq!(
+            picker_labels(&model),
             vec![
-                format!("  T{} first", n(&domain, 0)),
-                format!("  T{} third", n(&domain, 2)),
-                "none".to_string()
+                format!("T{} first", n(&domain, 0)),
+                format!("T{} third", n(&domain, 2)),
             ],
             "the task itself is not offered"
         );
-        for intent in [
-            BoardIntent::ListPickerQueryInsert(' '),
-            BoardIntent::ListPickerNext,
-            BoardIntent::ListPickerQueryInsert(' '),
-        ] {
-            handle(&temp, &mut domain, &mut model, intent, &mut host);
-        }
-        assert!(model
-            .visible_list_picker_options()
-            .iter()
-            .all(|(_, option)| option.label.starts_with("✓ ") || option.label == "none"));
-        handle(
-            &temp,
-            &mut domain,
-            &mut model,
-            BoardIntent::ConfirmListPicker,
-            &mut host,
+        let enter = picker_key(&model, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(enter, BoardIntent::AfterPickerPin);
+        handle(&temp, &mut domain, &mut model, enter.clone(), &mut host);
+        assert_eq!(
+            model.list_picker_query(),
+            Some(""),
+            "pinning clears the query"
         );
+        paste_query(&temp, &mut domain, &mut model, "i");
+        handle(&temp, &mut domain, &mut model, enter, &mut host);
+        assert_eq!(
+            picker_labels(&model),
+            vec![
+                format!("✓ T{} first", n(&domain, 0)),
+                format!("✓ T{} third", n(&domain, 2)),
+            ],
+            "Enter moves each match into the pinned list"
+        );
+        assert!(
+            temp.store
+                .load()
+                .expect("load")
+                .get(ids[1])
+                .expect("task")
+                .after
+                .is_empty(),
+            "Enter never saves"
+        );
+        let save = picker_key(&model, KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(save, BoardIntent::ConfirmListPicker);
+        handle(&temp, &mut domain, &mut model, save, &mut host);
         let disk = temp.store.load().expect("load");
         assert_eq!(
             disk.get(ids[1]).expect("task").after,
@@ -20720,6 +20848,15 @@ mod quick_assign_tests {
             &mut domain,
             &mut model,
             BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        let second = n(&domain, 1);
+        paste_query(&temp, &mut domain, &mut model, &format!("T{second}"));
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::AfterPickerPin,
             &mut host,
         );
         handle(
@@ -20745,6 +20882,602 @@ mod quick_assign_tests {
     }
 
     #[test]
+    fn the_task_picker_query_matches_the_number_and_title_words() {
+        let temp = Temp::new("after-query", &["builder"]);
+        let (mut domain, mut model, ids) =
+            board(&temp, &["Fix login timeout", "Logout button", "target"]);
+        let mut host = fake_host(&temp);
+        let n = |index: usize| number_of(&domain, ids[index]);
+        let (login, logout) = (n(0), n(1));
+        select(&mut domain, &mut model, ids[2]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        for (query, expected) in [
+            (
+                format!("{login}"),
+                vec![format!("T{login} Fix login timeout")],
+            ),
+            (
+                format!("t{logout}"),
+                vec![format!("T{logout} Logout button")],
+            ),
+            (
+                "LOG".to_string(),
+                vec![
+                    format!("T{login} Fix login timeout"),
+                    format!("T{logout} Logout button"),
+                ],
+            ),
+            (
+                "login fix".to_string(),
+                vec![format!("T{login} Fix login timeout")],
+            ),
+            ("nothing".to_string(), Vec::new()),
+        ] {
+            while model
+                .list_picker_query()
+                .is_some_and(|query| !query.is_empty())
+            {
+                handle(
+                    &temp,
+                    &mut domain,
+                    &mut model,
+                    BoardIntent::ListPickerQueryBackspace,
+                    &mut host,
+                );
+            }
+            paste_query(&temp, &mut domain, &mut model, &query);
+            assert_eq!(picker_labels(&model), expected, "query {query:?}");
+        }
+    }
+
+    /// The reported bug: unticking the only link and pressing Enter kept it.
+    #[test]
+    fn unpinning_every_task_and_saving_clears_the_list() {
+        let temp = Temp::new("after-unpin", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[1],
+            &[ids[0]],
+            HumanStatus::Open,
+        );
+        select(&mut domain, &mut model, ids[1]);
+        for intent in [BoardIntent::OpenAfterPicker, BoardIntent::AfterPickerPin] {
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+        }
+        assert!(picker_labels(&model).is_empty(), "nothing pinned");
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmListPicker,
+            &mut host,
+        );
+        let disk = temp.store.load().expect("load");
+        assert!(disk.get(ids[1]).expect("task").after.is_empty());
+        assert_eq!(
+            model.message(),
+            Some(format!("T{} runs after nothing", number_of(&disk, ids[1])).as_str())
+        );
+    }
+
+    #[test]
+    fn ctrl_x_unpins_every_task() {
+        let temp = Temp::new("after-clear-all", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[2],
+            &[ids[0], ids[1]],
+            HumanStatus::Open,
+        );
+        select(&mut domain, &mut model, ids[2]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        assert_eq!(picker_labels(&model).len(), 2);
+        let clear = picker_key(&model, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(clear, BoardIntent::AfterPickerClear);
+        handle(&temp, &mut domain, &mut model, clear, &mut host);
+        assert!(picker_labels(&model).is_empty());
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmListPicker,
+            &mut host,
+        );
+        let disk = temp.store.load().expect("load");
+        assert!(disk.get(ids[2]).expect("task").after.is_empty());
+    }
+
+    #[test]
+    fn enter_unpins_a_pinned_done_prerequisite() {
+        let temp = Temp::new("after-done-pin", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[2],
+            &[ids[0], ids[1]],
+            HumanStatus::Open,
+        );
+        domain.set_status(ids[0], HumanStatus::Done).expect("done");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        let (first, second) = (number_of(&domain, ids[0]), number_of(&domain, ids[1]));
+        select(&mut domain, &mut model, ids[2]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        assert_eq!(
+            picker_labels(&model),
+            vec![
+                format!("✓ T{first} first · done"),
+                format!("✓ T{second} second"),
+            ],
+            "a done prerequisite shows pinned"
+        );
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::AfterPickerPin,
+            &mut host,
+        );
+        assert_eq!(picker_labels(&model), vec![format!("✓ T{second} second")]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmListPicker,
+            &mut host,
+        );
+        let disk = temp.store.load().expect("load");
+        assert_eq!(disk.get(ids[2]).expect("task").after, vec![second]);
+    }
+
+    #[test]
+    fn the_task_picker_keeps_one_size_and_scrolls_its_matches() {
+        let temp = Temp::new("after-scroll", &["builder"]);
+        let titles: Vec<String> = (0..20).map(|index| format!("login {index}")).collect();
+        let mut all: Vec<&str> = titles.iter().map(String::as_str).collect();
+        all.push("target");
+        let (mut domain, mut model, ids) = board(&temp, &all);
+        let mut host = fake_host(&temp);
+        select(&mut domain, &mut model, ids[20]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let card = |model: &BoardModel| {
+            let hits = crate::ui::board::board_hit_map(area, model);
+            let card = hits
+                .regions
+                .iter()
+                .find(|hit| hit.target == QueueHitTarget::ModalChrome)
+                .map(|hit| hit.area)
+                .expect("card");
+            let rows: Vec<usize> = hits
+                .regions
+                .iter()
+                .filter_map(|hit| match hit.target {
+                    QueueHitTarget::ListPickerOption(index) => Some(index),
+                    _ => None,
+                })
+                .collect();
+            (card, rows)
+        };
+        let (empty, _) = card(&model);
+        paste_query(&temp, &mut domain, &mut model, "login 2");
+        let (few, few_rows) = card(&model);
+        assert!(
+            few_rows.len() < 8,
+            "fewer matches than the window: {few_rows:?}"
+        );
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ListPickerQueryBackspace,
+            &mut host,
+        );
+        let (many, many_rows) = card(&model);
+        assert_eq!(
+            empty, few,
+            "the card keeps its size whatever the match count"
+        );
+        assert_eq!(few, many);
+        assert_eq!(
+            many_rows,
+            (0..8).collect::<Vec<_>>(),
+            "a fixed match window"
+        );
+        for _ in 0..10 {
+            handle(
+                &temp,
+                &mut domain,
+                &mut model,
+                BoardIntent::ListPickerNext,
+                &mut host,
+            );
+        }
+        let (_, scrolled) = card(&model);
+        assert_eq!(
+            scrolled,
+            (3..11).collect::<Vec<_>>(),
+            "the window follows the cursor"
+        );
+    }
+
+    /// The footer hits of each `before` number on the open page, as (number, click point).
+    fn before_clicks(model: &BoardModel) -> Vec<(u64, (u16, u16))> {
+        crate::ui::board::board_hit_map(ratatui::layout::Rect::new(0, 0, 100, 30), model)
+            .regions
+            .iter()
+            .filter_map(|hit| match hit.target {
+                QueueHitTarget::FooterBefore(number) => Some((number, (hit.area.x, hit.area.y))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_click_on_a_footer_before_number_opens_that_task() {
+        let temp = Temp::new("before-click", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        for waiting in [ids[1], ids[2]] {
+            link(
+                &temp,
+                &mut domain,
+                &mut model,
+                waiting,
+                &[ids[0]],
+                HumanStatus::Open,
+            );
+        }
+        for target in [ids[1], ids[2]] {
+            select(&mut domain, &mut model, ids[0]);
+            // A page left parked rebinds to the selection; otherwise Enter opens it.
+            if model.input_mode() != BoardInputMode::TaskPage {
+                handle(
+                    &temp,
+                    &mut domain,
+                    &mut model,
+                    BoardIntent::OpenTaskPage,
+                    &mut host,
+                );
+            }
+            assert_eq!(model.edit_target(), Some(ids[0]));
+            let number = number_of(&domain, target);
+            let clicks = before_clicks(&model);
+            assert_eq!(
+                clicks.len(),
+                2,
+                "each before number is its own click target"
+            );
+            let (_, (x, y)) = clicks
+                .into_iter()
+                .find(|(n, _)| *n == number)
+                .expect("a hit for this number");
+            let intent = crate::ui::mouse::map_board_mouse(
+                &model,
+                &crate::ui::board::board_hit_map(ratatui::layout::Rect::new(0, 0, 100, 30), &model),
+                crate::ui::mouse::left_click(x, y),
+            )
+            .expect("the click maps");
+            assert_eq!(intent, BoardIntent::OpenBeforeTask(number));
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+            assert_eq!(model.input_mode(), BoardInputMode::TaskPage);
+            assert_eq!(model.edit_target(), Some(target));
+            assert_eq!(model.selected_id(), Some(target));
+            handle(
+                &temp,
+                &mut domain,
+                &mut model,
+                BoardIntent::CloseLayer,
+                &mut host,
+            );
+        }
+
+        // A task in another project moves the board there, so the selection can follow.
+        let elsewhere = domain
+            .create(
+                "elsewhere",
+                None,
+                TaskScope::Project {
+                    path: "/repos/other".into(),
+                },
+                ProvenanceOrigin::Manual,
+                None,
+            )
+            .expect("create task");
+        domain
+            .set_after(elsewhere, &[number_of(&domain, ids[1])])
+            .expect("after");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        let number = number_of(&domain, elsewhere);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenBeforeTask(number),
+            &mut host,
+        );
+        assert_eq!(model.edit_target(), Some(elsewhere));
+        assert_eq!(model.selected_id(), Some(elsewhere));
+        assert!(model.visible_ids().contains(&elsewhere));
+    }
+
+    #[test]
+    fn an_archived_task_is_not_a_footer_before_link() {
+        let temp = Temp::new("before-archived", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[1],
+            &[ids[0]],
+            HumanStatus::Open,
+        );
+        domain.archive_task(ids[1]).expect("archive");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        select(&mut domain, &mut model, ids[0]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenTaskPage,
+            &mut host,
+        );
+        assert!(before_clicks(&model).is_empty());
+        let (screen, _) = board_screen(&model, 100, 30);
+        assert!(!screen.contains("before T"), "{screen}");
+    }
+
+    /// A before link to a task the board does not paint (a done task, drawer shut) opens its
+    /// page without moving the selection; the page's pickers still act on the page's task
+    /// (the reducer binds the selection to the focused page's task before each intent).
+    #[test]
+    fn a_page_opened_from_a_before_link_acts_on_its_own_task() {
+        let temp = Temp::new("before-hidden", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[1],
+            &[ids[0], ids[2]],
+            HumanStatus::Open,
+        );
+        domain.set_status(ids[1], HumanStatus::Done).expect("done");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        assert!(!model.visible_ids().contains(&ids[1]), "the drawer is shut");
+        let second = number_of(&domain, ids[1]);
+        select(&mut domain, &mut model, ids[0]);
+        for intent in [
+            BoardIntent::OpenTaskPage,
+            BoardIntent::OpenBeforeTask(second),
+        ] {
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+        }
+        assert_eq!(model.edit_target(), Some(ids[1]));
+        assert_eq!(
+            model.selected_id(),
+            Some(ids[0]),
+            "the selection stays painted"
+        );
+        apply_intent(&mut domain, &mut model, BoardIntent::OpenAfterPicker, None)
+            .expect("open picker");
+        assert_eq!(
+            model.after_picker_title(),
+            Some(format!("T{second} runs after").as_str())
+        );
+        for intent in [BoardIntent::AfterPickerPin, BoardIntent::ConfirmListPicker] {
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+        }
+        let disk = temp.store.load().expect("load");
+        assert_eq!(
+            disk.get(ids[1]).expect("task").after,
+            vec![number_of(&disk, ids[2])]
+        );
+        assert!(disk.get(ids[0]).expect("task").after.is_empty());
+    }
+
+    #[test]
+    fn unpinning_the_last_pinned_task_keeps_the_rest_and_saves_them() {
+        let temp = Temp::new("after-unpin-last", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[2],
+            &[ids[0], ids[1]],
+            HumanStatus::Open,
+        );
+        select(&mut domain, &mut model, ids[2]);
+        for intent in [
+            BoardIntent::OpenAfterPicker,
+            BoardIntent::ListPickerNext,
+            BoardIntent::AfterPickerPin,
+        ] {
+            handle(&temp, &mut domain, &mut model, intent, &mut host);
+        }
+        let first = number_of(&domain, ids[0]);
+        assert_eq!(
+            model
+                .selected_list_picker_option()
+                .map(|(_, option)| option.label),
+            Some(format!("✓ T{first} first")),
+            "back on the task still pinned"
+        );
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmListPicker,
+            &mut host,
+        );
+        let disk = temp.store.load().expect("load");
+        assert_eq!(disk.get(ids[2]).expect("task").after, vec![first]);
+    }
+
+    #[test]
+    fn a_click_on_a_task_picker_row_pins_without_saving() {
+        let temp = Temp::new("after-click", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second"]);
+        let mut host = fake_host(&temp);
+        select(&mut domain, &mut model, ids[1]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        let first = number_of(&domain, ids[0]);
+        paste_query(&temp, &mut domain, &mut model, &first.to_string());
+        let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let hits = crate::ui::board::board_hit_map(area, &model);
+        let row = hits
+            .regions
+            .iter()
+            .find(|hit| hit.target == QueueHitTarget::ListPickerOption(0))
+            .expect("the match row");
+        let intent = crate::ui::mouse::map_board_mouse(
+            &model,
+            &hits,
+            crate::ui::mouse::left_click(row.area.x + 2, row.area.y),
+        )
+        .expect("the click maps");
+        assert!(!crate::ui::board::board_intent_may_persist(&model, &intent));
+        handle(&temp, &mut domain, &mut model, intent, &mut host);
+        assert_eq!(model.list_picker_kind(), Some(ListPickerKind::After));
+        assert_eq!(picker_labels(&model), vec![format!("✓ T{first} first")]);
+        assert!(temp
+            .store
+            .load()
+            .expect("load")
+            .get(ids[1])
+            .expect("task")
+            .after
+            .is_empty());
+    }
+
+    #[test]
+    fn the_task_picker_on_a_marked_set_saves_one_undo_step() {
+        let temp = Temp::new("after-marked", &["builder"]);
+        let (mut domain, mut model, ids) = board(&temp, &["first", "second", "third"]);
+        let mut host = fake_host(&temp);
+        apply_intent(&mut domain, &mut model, BoardIntent::ToggleMarkMode, None).expect("mark");
+        for id in [ids[1], ids[2]] {
+            select(&mut domain, &mut model, id);
+            apply_intent(&mut domain, &mut model, BoardIntent::MarkToggle, None).expect("mark");
+        }
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        assert_eq!(model.after_picker_title(), Some("2 tasks run after"));
+        let first = number_of(&domain, ids[0]);
+        paste_query(&temp, &mut domain, &mut model, &first.to_string());
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::AfterPickerPin,
+            &mut host,
+        );
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::ConfirmListPicker,
+            &mut host,
+        );
+        let disk = temp.store.load().expect("load");
+        for id in [ids[1], ids[2]] {
+            assert_eq!(disk.get(id).expect("task").after, vec![first]);
+        }
+        assert!(matches!(
+            domain.last_undo(),
+            Some(UndoEntry::Batch { entries }) if entries.len() == 2
+        ));
+        handle(&temp, &mut domain, &mut model, BoardIntent::Undo, &mut host);
+        let disk = temp.store.load().expect("load");
+        assert!([ids[1], ids[2]]
+            .iter()
+            .all(|id| disk.get(*id).expect("task").after.is_empty()));
+    }
+
+    #[test]
+    fn long_task_picker_rows_wrap_instead_of_clipping() {
+        let temp = Temp::new("after-wrap", &["builder"]);
+        let long = "Refactor the session expiry handling so idle tabs log out cleanly everywhere";
+        let (mut domain, mut model, ids) = board(&temp, &[long, "target"]);
+        let mut host = fake_host(&temp);
+        link(
+            &temp,
+            &mut domain,
+            &mut model,
+            ids[1],
+            &[ids[0]],
+            HumanStatus::Open,
+        );
+        domain.set_status(ids[0], HumanStatus::Done).expect("done");
+        temp.store.reload_merge_save(&mut domain).expect("save");
+        model.sync_from_domain(&domain);
+        select(&mut domain, &mut model, ids[1]);
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        let (screen, _) = board_screen(&model, 60, 30);
+        assert!(screen.contains("everywhere · done"), "{screen}");
+    }
+
+    #[test]
     fn the_page_after_field_saves_with_the_edit() {
         let temp = Temp::new("after-page", &["builder"]);
         let (mut domain, mut model, ids) = board(&temp, &["first", "second"]);
@@ -20763,6 +21496,15 @@ mod quick_assign_tests {
             &mut domain,
             &mut model,
             BoardIntent::OpenAfterPicker,
+            &mut host,
+        );
+        let first = number_of(&domain, ids[0]);
+        paste_query(&temp, &mut domain, &mut model, &first.to_string());
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::AfterPickerPin,
             &mut host,
         );
         handle(
@@ -20816,6 +21558,14 @@ mod quick_assign_tests {
         for intent in [BoardIntent::OpenTaskPage, BoardIntent::OpenAfterPicker] {
             handle(&temp, &mut domain, &mut model, intent, &mut host);
         }
+        paste_query(&temp, &mut domain, &mut model, &first.to_string());
+        handle(
+            &temp,
+            &mut domain,
+            &mut model,
+            BoardIntent::AfterPickerPin,
+            &mut host,
+        );
         let mut recovery = SaveRecovery::new();
         let baseline = domain.clone();
         apply_board_intent_with_save_recovery(

@@ -158,6 +158,8 @@ pub enum BoardIntent {
     /// Open the task picker for what the selected task, marked set, or After field runs after
     /// (palette **set after…**, the page's After field).
     OpenAfterPicker,
+    /// A click on one number of the task page footer's `before T6, T7`: open that task's page.
+    OpenBeforeTask(u64),
     /// Open the waiting-on picker for who the open block or review waits on: the page's task
     /// (`Enter` on its top line), or the selected task or marked set (palette **set waiting
     /// on…**).
@@ -305,6 +307,10 @@ pub enum BoardIntent {
     ListPickerQueryInsertText(String),
     ListPickerQueryBackspace,
     ListPickerQueryDeleteWord,
+    /// Task picker `Enter`: pin the highlighted match, or unpin the highlighted pinned task.
+    AfterPickerPin,
+    /// Task picker `ctrl+x`: unpin every task.
+    AfterPickerClear,
     /// Type into the active lens's search.
     SearchQueryInsert(char),
     /// Paste into the active lens's search.
@@ -1371,6 +1377,24 @@ fn help_bindings() -> Vec<HelpBinding> {
         ),
         help_binding(
             HelpGroup::PickersEditing,
+            "enter (after picker)",
+            "pin or unpin a task",
+            "after wait select tick",
+        ),
+        help_binding(
+            HelpGroup::PickersEditing,
+            "ctrl+x (after picker)",
+            "unpin every task",
+            "after wait clear all",
+        ),
+        help_binding(
+            HelpGroup::PickersEditing,
+            "shift+enter (after picker)",
+            "save what it runs after",
+            "after wait apply",
+        ),
+        help_binding(
+            HelpGroup::PickersEditing,
             "ctrl+f (picker)",
             "archive project",
             "hide file",
@@ -2267,6 +2291,7 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::BeginEditScope
         | BoardIntent::OpenBasePicker
         | BoardIntent::OpenAfterPicker
+        | BoardIntent::OpenBeforeTask(_)
         | BoardIntent::OpenOnPicker
         | BoardIntent::ChainAfter
         | BoardIntent::BeginAddStep
@@ -2351,6 +2376,8 @@ pub fn intent_primary_action(intent: &BoardIntent) -> Option<PrimaryBoardAction>
         | BoardIntent::ListPickerQueryInsertText(_)
         | BoardIntent::ListPickerQueryBackspace
         | BoardIntent::ListPickerQueryDeleteWord
+        | BoardIntent::AfterPickerPin
+        | BoardIntent::AfterPickerClear
         | BoardIntent::SearchQueryInsert(_)
         | BoardIntent::SearchQueryInsertText(_)
         | BoardIntent::SearchQueryBackspace

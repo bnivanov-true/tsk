@@ -163,7 +163,7 @@ On a blocked page or a review:
 | Existing step: keep the rename in this edit | `Enter` |
 | Add a step from a selected step, **+ step**, the Scope row, or a selected Thread | `ctrl+a` |
 | Stage removal of the selected step | `ctrl+x` |
-| Open the Scope, Assignee, Base, or After picker; confirm the choice | `Enter` |
+| Open the Scope, Assignee, Base, or After picker; confirm the choice. In the After picker, `Enter` pins and `shift+Enter` saves | `Enter` |
 | Cycle Scope or Assignee without opening it | `Space` or `←` / `→` |
 | Open / close the Thread editor | `Enter` |
 | Line start / end | `Home` / `End` or `ctrl+a` / `ctrl+e` |
@@ -188,7 +188,7 @@ In the step editor, `ctrl+d` and `ctrl+o` still act on the task, and `ctrl+x` st
 
 ### If shift+Enter does not save
 
-Some terminals send a plain line feed for `shift+Enter`, such as Ghostty with `keybind = shift+enter=text:\n`. tsk reads it as `ctrl+j` and changes nothing. In a form it shows `Shift+Enter sent Ctrl+J: check terminal keys`. Remove the binding, or map `shift+Enter` to a sequence that keeps the Shift modifier.
+Some terminals send a plain line feed for `shift+Enter`, such as Ghostty with `keybind = shift+enter=text:\n`. tsk reads it as `ctrl+j` and changes nothing. In a form or the After picker it shows `Shift+Enter sent Ctrl+J: check terminal keys`. Remove the binding, or map `shift+Enter` to a sequence that keeps the Shift modifier.
 
 ## Quick-add
 
@@ -213,7 +213,7 @@ In the Herdr popup, `shift+Enter` saves and closes it. `Esc` or `ctrl+c` discard
 | Assignee and waiting-on pickers, **type a name…** | the row shows what you typed, such as `@dana` · `Enter` applies it |
 | Assignee picker, a person selected | `ctrl+x` [removes the name](/docs/dispatch/#remove-a-name-from-the-list) from the list · `ctrl+u` puts it back |
 | Waiting-on picker | as the assignee picker, and `←` / `→` also move |
-| After picker | as above, and `Space` ticks several · `Enter` applies the ticked tasks or the highlighted one · **none** clears |
+| After picker | type a number or words · `↑` / `↓` select · `Enter` pins a match or unpins a pinned task · `ctrl+x` unpins every task · `shift+Enter` saves the pinned tasks · `Esc` closes with no change |
 | Board search (`/`) | type or paste · `Backspace` · `Enter` pins the query · `Esc` clears and closes |
 | Palette (`:`) | type to filter · `↑` / `↓` or `Tab` / `shift+Tab` select · `Enter` runs · `Esc` closes |
 | Help (`?`) | type to filter by key or action · `↑` / `↓`, page keys, or the wheel scroll · `Esc` clears the search, then closes |

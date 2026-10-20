@@ -374,10 +374,14 @@ fn stale_undo_message(domain: &DomainState, id: Uuid) -> String {
 pub fn board_intent_may_persist(model: &BoardModel, intent: &BoardIntent) -> bool {
     // The mouse route recurses into ConfirmListPicker inside the reducer, so the outer
     // intent is the one the save baseline is decided on.
+    // A click in the task picker only pins or unpins; shift+Enter is its one save.
+    let picker_click_pins = matches!(intent, BoardIntent::SelectListOption(_))
+        && model.list_picker_kind() == Some(crate::ui::board::ListPickerKind::After);
     let picker_assignment = matches!(
         intent,
         BoardIntent::ConfirmListPicker | BoardIntent::SelectListOption(_)
-    ) && model.input_mode == BoardInputMode::ListPicker
+    ) && !picker_click_pins
+        && model.input_mode == BoardInputMode::ListPicker
         && matches!(
             model.list_picker_kind(),
             Some(
@@ -682,6 +686,9 @@ fn apply_board_intent(
         intent,
         BoardIntent::CloseLayer | BoardIntent::OpenTaskPage | BoardIntent::StageLeft
     );
+    // A focused task page acts on its own task: bind the selection to it before the intent,
+    // so verbs and pickers reach the page's task even when the board does not paint it (a
+    // `before` link to a done task with the drawer shut opens without moving the board).
     if model.focused_surface() == FocusedSurface::Task
         && !closes_the_page
         && matches!(
@@ -2258,10 +2265,45 @@ fn apply_board_intent(
             model.open_after_picker(ids, current, &scope, edit_draft, own);
             return Ok(IntentOutcome::None);
         }
-        BoardIntent::ListPickerQueryInsert(' ')
+        BoardIntent::OpenBeforeTask(number) => {
+            let Some(task) = domain.task_by_number(number) else {
+                return Ok(IntentOutcome::None);
+            };
+            if model.form.is_some() && model.has_unsaved_work() {
+                model.set_message(DIRTY_TASK_SWITCH_REFUSAL);
+                return Ok(IntentOutcome::None);
+            }
+            let (id, scope) = (task.id, task.scope.clone());
+            // The page follows the board selection, so the board moves to the task's own
+            // project (or the desk) when the current one does not paint it. Selection only
+            // rests on a painted row: a task hidden there too opens without moving it.
+            if !model.visible_ids().contains(&id) {
+                model.clear_marks();
+                model.set_board_scope(match scope {
+                    TaskScope::Project { path } => ProjectScopeOption::Project(PathBuf::from(path)),
+                    TaskScope::Global => ProjectScopeOption::Home,
+                });
+            }
+            if model.visible_ids().contains(&id) {
+                model.select_row(id);
+            }
+            open_full_task_page(domain, model, id);
+            return Ok(IntentOutcome::None);
+        }
+        BoardIntent::AfterPickerPin => {
+            model.toggle_after_pin();
+            return Ok(IntentOutcome::None);
+        }
+        BoardIntent::AfterPickerClear => {
+            model.clear_after_pins();
+            return Ok(IntentOutcome::None);
+        }
+        BoardIntent::SelectListOption(index)
             if model.list_picker_kind() == Some(crate::ui::board::ListPickerKind::After) =>
         {
-            model.toggle_after_tick();
+            if model.select_list_picker_option(index) {
+                model.toggle_after_pin();
+            }
             return Ok(IntentOutcome::None);
         }
         BoardIntent::ConfirmListPicker
