@@ -164,10 +164,21 @@ fn output(stdout: String, stderr: String, code: u8) -> CliOutput {
     }
 }
 
+/// `text` as the CLI prints it: credentials in any URL read `***`, terminal controls are
+/// escaped. Every target location and every error that can quote one goes through it.
+fn redacted_text(text: &str) -> String {
+    terminal_text(&backup::redacted(text))
+}
+
+/// A target's location as the CLI prints it: [`backup::shown_location`], terminal-safe.
+fn location_text(location: &str) -> String {
+    terminal_text(&backup::shown_location(location))
+}
+
 /// `tsk <verb>: <message>` on stderr, exit 1. Each line is made safe on its own, so a
 /// message tsk writes on two lines prints as two lines rather than an escaped newline.
 fn refused(verb: &str, message: &str) -> CliOutput {
-    let lines: Vec<String> = message.split('\n').map(terminal_text).collect();
+    let lines: Vec<String> = message.split('\n').map(redacted_text).collect();
     output(
         String::new(),
         format!("tsk {verb}: {}\n", lines.join("\n")),
@@ -179,7 +190,7 @@ fn refused(verb: &str, message: &str) -> CliOutput {
 pub fn run_backup(args: Vec<String>) -> CliOutput {
     let input = match parse_backup(&args) {
         Ok(input) => input,
-        Err(reason) => return presenter::backup_usage(&reason),
+        Err(reason) => return presenter::backup_usage(&backup::redacted(&reason)),
     };
     if input.help {
         return presenter::backup_help();
@@ -204,7 +215,7 @@ pub fn run_backup(args: Vec<String>) -> CliOutput {
                 format!(
                     "removed {} target {}; copies already made stay where they are\n",
                     removed.kind.word(),
-                    terminal_text(&removed.location)
+                    location_text(&removed.location)
                 ),
                 String::new(),
                 0,
@@ -411,7 +422,7 @@ fn backup_setup(state_dir: &std::path::Path, repo: Option<&str>) -> CliOutput {
             || backup::absolute_path(&url).as_ref() == Some(&target.location)
     }) {
         return output(
-            format!("already backing up to {shown} ({})\n", terminal_text(&url)),
+            format!("already backing up to {shown} ({})\n", location_text(&url)),
             String::new(),
             0,
         );
@@ -483,7 +494,7 @@ fn backup_add(state_dir: &std::path::Path, location: &str, every: Option<Every>)
             };
             let mut stdout = format!(
                 "{verb} target {} ({})\n",
-                terminal_text(&target.location),
+                location_text(&target.location),
                 target.every.phrase()
             );
             if outcome == AddOutcome::Added {
@@ -507,7 +518,7 @@ fn backup_add(state_dir: &std::path::Path, location: &str, every: Option<Every>)
                 Ok(outcome) => {
                     stdout.push_str(&match outcome {
                         RunOutcome::Written(place) => {
-                            format!("backed up to {}\n", terminal_text(&place))
+                            format!("backed up to {}\n", redacted_text(&place))
                         }
                         RunOutcome::UpToDate => "the target is up to date\n".into(),
                         RunOutcome::NoStore => {
@@ -520,8 +531,8 @@ fn backup_add(state_dir: &std::path::Path, location: &str, every: Option<Every>)
                     let stderr = match backup::probe_detached(state_dir, index) {
                         Probe::Failed(error) => format!(
                             "tsk backup: this backup worked, but a background backup (as a save starts one) could not reach {}: {}\nBackground backups have no terminal: git must reach the target without a prompt (an ssh-agent or credential helper the board's shell can see).\n",
-                            terminal_text(&target.location),
-                            terminal_text(&error),
+                            location_text(&target.location),
+                            redacted_text(&error),
                         ),
                         Probe::Reached | Probe::NoAnswer => String::new(),
                     };
@@ -531,8 +542,8 @@ fn backup_add(state_dir: &std::path::Path, location: &str, every: Option<Every>)
                     stdout,
                     format!(
                         "tsk backup: the first backup to {} failed: {}\nThe target is saved. Fix the URL or your git access, then run `tsk backup`.\n",
-                        terminal_text(&target.location),
-                        terminal_text(&error),
+                        location_text(&target.location),
+                        redacted_text(&error),
                     ),
                     1,
                 ),
@@ -556,10 +567,10 @@ fn backup_now(state_dir: &std::path::Path) -> CliOutput {
     let mut stdout = String::new();
     let mut stderr = String::new();
     for (target, result) in results {
-        let location = terminal_text(&target.location);
+        let location = location_text(&target.location);
         match result {
             Ok(RunOutcome::Written(place)) => {
-                stdout.push_str(&format!("backed up to {}\n", terminal_text(&place)))
+                stdout.push_str(&format!("backed up to {}\n", redacted_text(&place)))
             }
             Ok(RunOutcome::UpToDate) => stdout.push_str(&format!("{location} is up to date\n")),
             Ok(RunOutcome::NoStore) => {
@@ -568,7 +579,7 @@ fn backup_now(state_dir: &std::path::Path) -> CliOutput {
             Ok(RunOutcome::NotDue) => {}
             Err(error) => stderr.push_str(&format!(
                 "tsk backup: {location}: {}\n",
-                terminal_text(&error)
+                redacted_text(&error)
             )),
         }
     }
@@ -593,7 +604,7 @@ fn backup_list(state_dir: &std::path::Path) -> CliOutput {
         stdout.push_str(&format!(
             "{}. {} ({})\n",
             index + 1,
-            terminal_text(&target.location),
+            location_text(&target.location),
             target.every.phrase()
         ));
         let last = status
@@ -608,7 +619,7 @@ fn backup_list(state_dir: &std::path::Path) -> CliOutput {
                 .unwrap_or_default();
             stdout.push_str(&format!(
                 "   last error ({when}): {}\n",
-                terminal_text(error)
+                redacted_text(error)
             ));
         }
     }
@@ -619,7 +630,7 @@ fn backup_list(state_dir: &std::path::Path) -> CliOutput {
 pub fn run_restore<R: Read>(args: Vec<String>, stdin: &mut R, stdin_is_tty: bool) -> CliOutput {
     let (rest, state_dir, help) = match common_flags(&args) {
         Ok(parsed) => parsed,
-        Err(reason) => return presenter::restore_usage(&reason),
+        Err(reason) => return presenter::restore_usage(&backup::redacted(&reason)),
     };
     if help {
         return presenter::restore_help();
@@ -630,24 +641,33 @@ pub fn run_restore<R: Read>(args: Vec<String>, stdin: &mut R, stdin_is_tty: bool
         match word.as_str() {
             "--all" => all = true,
             flag if flag.starts_with('-') => {
-                return presenter::restore_usage(&format!("unknown restore argument {flag}"))
+                return presenter::restore_usage(&backup::redacted(&format!(
+                    "unknown restore argument {flag}"
+                )))
             }
             id if wanted.is_none() => wanted = Some(id.to_string()),
             extra => {
-                return presenter::restore_usage(&format!("unexpected restore argument {extra}"))
+                return presenter::restore_usage(&backup::redacted(&format!(
+                    "unexpected restore argument {extra}"
+                )))
             }
         }
     }
     // A task number is never a version id: answer that before anything about targets.
     if let Some(id) = wanted.as_deref().filter(|id| looks_like_task(id)) {
-        return output(
-            String::new(),
+        // Bare digits are more likely a `#` from the list than a task: name both, act on none.
+        let message = if id.bytes().all(|b| b.is_ascii_digit()) {
+            format!(
+                "tsk restore: {0} is not a version id; give the id from the list (`tsk restore` shows it)\nfor task T{0} in the trash, run `tsk trash restore T{0}`\n",
+                terminal_text(id)
+            )
+        } else {
             format!(
                 "tsk restore: {0} is a task, not a backup version\ndid you mean `tsk trash restore {0}`?\n",
                 terminal_text(id)
-            ),
-            1,
-        );
+            )
+        };
+        return output(String::new(), message, 1);
     }
     let state_dir = state_dir.unwrap_or_else(default_state_dir);
     match backup::load_targets(&state_dir) {
@@ -660,7 +680,8 @@ pub fn run_restore<R: Read>(args: Vec<String>, stdin: &mut R, stdin_is_tty: bool
         Ok(_) => {}
         Err(error) => return refused("restore", &error),
     }
-    let (versions, failures) = match backup::list_versions(&state_dir, all) {
+    // An id names one version wherever it is, past the newest 20 per machine too.
+    let (versions, failures) = match backup::list_versions(&state_dir, all || wanted.is_some()) {
         Ok(listed) => listed,
         Err(error) => return refused("restore", &error),
     };
@@ -668,15 +689,15 @@ pub fn run_restore<R: Read>(args: Vec<String>, stdin: &mut R, stdin_is_tty: bool
     for (target, error) in &failures {
         stderr.push_str(&format!(
             "tsk restore: could not read {}: {}\n",
-            terminal_text(&target.location),
-            terminal_text(error)
+            location_text(&target.location),
+            redacted_text(error)
         ));
     }
     if let Some(id) = wanted {
         let Some(version) = versions.iter().find(|version| version.id == id) else {
             stderr.push_str(&format!(
                 "tsk restore: unknown version {}; run tsk restore to list them\n",
-                terminal_text(&id)
+                redacted_text(&id)
             ));
             return output(String::new(), stderr, 1);
         };
@@ -750,7 +771,7 @@ fn version_table(versions: &[Version]) -> String {
                     .tasks
                     .map(|count| count.to_string())
                     .unwrap_or_else(|| "?".into()),
-                terminal_text(&version.target),
+                redacted_text(&version.target),
             ]
         })
         .collect();
