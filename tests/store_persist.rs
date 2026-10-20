@@ -39,16 +39,16 @@ fn platform_nanos(nanos: u32) -> u32 {
     nanos
 }
 
-fn platform_v14_fixture() -> Vec<u8> {
+fn platform_v15_fixture() -> Vec<u8> {
     #[cfg(not(windows))]
-    return include_bytes!("fixtures/current_store_v14.json").to_vec();
+    return include_bytes!("fixtures/current_store_v15.json").to_vec();
     #[cfg(windows)]
     {
         // Round-trip through the persisted type, not Value's sorted map. SystemTime applies
         // Windows' 100 ns precision while DomainState preserves the canonical field order.
         let state: DomainState =
-            serde_json::from_str(include_str!("fixtures/current_store_v14.json"))
-                .expect("v14 fixture");
+            serde_json::from_str(include_str!("fixtures/current_store_v15.json"))
+                .expect("v15 fixture");
         serde_json::to_vec_pretty(&state).expect("encode platform fixture")
     }
 }
@@ -85,7 +85,7 @@ fn literal_current_v1_fixture_pins_the_complete_store_wire_shape() {
     .expect("install current fixture");
 
     let mut state = TaskStore::new(&dir).load().expect("load current fixture");
-    assert_eq!(state.format_version(), 14, "the v1 fixture loads migrated");
+    assert_eq!(state.format_version(), 15, "the v1 fixture loads migrated");
     assert!(state.projects().is_empty());
     assert_eq!(state.next_task_number, 8);
     assert_eq!(state.next_notice_number, 1);
@@ -159,7 +159,7 @@ fn v1_document_loads_through_the_chain_and_first_save_leaves_tsk_json_v1_beside_
     let store = TaskStore::new(&dir);
 
     let state = store.load().expect("v1 document loads through the chain");
-    assert_eq!(state.format_version(), 14);
+    assert_eq!(state.format_version(), 15);
     assert!(state.projects().is_empty(), "v1 has no archived projects");
     assert!(state.tasks().iter().all(|task| !task.archived));
 
@@ -172,7 +172,7 @@ fn v1_document_loads_through_the_chain_and_first_save_leaves_tsk_json_v1_beside_
     let live: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("tsk.json")).expect("read live"))
             .expect("json");
-    assert_eq!(live["format_version"], 14);
+    assert_eq!(live["format_version"], 15);
     assert_eq!(live["projects"], serde_json::json!({}));
     assert_eq!(live["next_notice_number"], 1);
 }
@@ -190,7 +190,7 @@ fn v2_document_loads_with_notice_counter_one_and_first_save_leaves_tsk_json_v2_b
     let store = TaskStore::new(&dir);
 
     let state = store.load().expect("v2 document loads through the chain");
-    assert_eq!(state.format_version(), 14);
+    assert_eq!(state.format_version(), 15);
     assert_eq!(state.next_notice_number, 1);
     assert!(state.tasks().iter().all(|task| !task.is_notice()));
     assert_eq!(state.tasks()[0].board_identifier().as_deref(), Some("T7"));
@@ -203,8 +203,8 @@ fn v2_document_loads_with_notice_counter_one_and_first_save_leaves_tsk_json_v2_b
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a migrated v2 document saves as the canonical platform v14 wire"
+        platform_v15_fixture().as_slice(),
+        "a migrated v2 document saves as the canonical platform v15 wire"
     );
 }
 
@@ -223,7 +223,7 @@ fn v3_document_loads_ready_as_open_and_first_save_leaves_tsk_json_v3_beside_the_
     let state = store
         .load()
         .expect("v3 document with ready tasks loads through the chain");
-    assert_eq!(state.format_version(), 14);
+    assert_eq!(state.format_version(), 15);
     let task = state.tasks().first().expect("fixture task");
     assert_eq!(task.status, HumanStatus::Open, "ready migrates to open");
     assert_eq!(
@@ -248,7 +248,7 @@ fn v3_document_loads_ready_as_open_and_first_save_leaves_tsk_json_v3_beside_the_
     let live: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("tsk.json")).expect("read live"))
             .expect("json");
-    assert_eq!(live["format_version"], 14);
+    assert_eq!(live["format_version"], 15);
     assert_eq!(live["tasks"][0]["status"], "open");
 }
 
@@ -264,7 +264,7 @@ fn v3_document_loads_through_the_chain_and_first_save_leaves_tsk_json_v3_beside_
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v3 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     assert!(loaded.projects().is_empty());
     assert_eq!(loaded.next_notice_number, 1);
     assert_eq!(
@@ -280,8 +280,8 @@ fn v3_document_loads_through_the_chain_and_first_save_leaves_tsk_json_v3_beside_
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a migrated v3 document saves as the canonical platform v14 wire"
+        platform_v15_fixture().as_slice(),
+        "a migrated v3 document saves as the canonical platform v15 wire"
     );
 }
 
@@ -297,7 +297,7 @@ fn v4_document_migrates_to_v5_and_keeps_its_original_backup() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load v4 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     assert!(loaded.projects().is_empty());
     assert_eq!(loaded.next_notice_number, 1);
 
@@ -309,13 +309,13 @@ fn v4_document_migrates_to_v5_and_keeps_its_original_backup() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a migrated v4 document saves as the canonical platform v14 wire"
+        platform_v15_fixture().as_slice(),
+        "a migrated v4 document saves as the canonical platform v15 wire"
     );
 }
 
 #[test]
-fn literal_v5_fixture_migrates_to_canonical_v14() {
+fn literal_v5_fixture_migrates_to_canonical_v15() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     fs::write(
@@ -326,7 +326,7 @@ fn literal_v5_fixture_migrates_to_canonical_v14() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v5 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     assert!(loaded.projects().is_empty());
     assert_eq!(loaded.next_notice_number, 1);
     assert_eq!(loaded.tasks()[0].assignee, None);
@@ -334,13 +334,13 @@ fn literal_v5_fixture_migrates_to_canonical_v14() {
     store.save(&loaded).expect("save loaded state");
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read resaved live document"),
-        platform_v14_fixture().as_slice(),
-        "a v5 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v5 state must serialize as canonical platform v15"
     );
 }
 
 #[test]
-fn literal_v6_fixture_migrates_to_v14_backs_up_and_round_trips() {
+fn literal_v6_fixture_migrates_to_v15_backs_up_and_round_trips() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v6 = include_bytes!("fixtures/current_store_v6.json");
@@ -348,7 +348,7 @@ fn literal_v6_fixture_migrates_to_v14_backs_up_and_round_trips() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v6 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     assert_eq!(loaded.tasks()[0].block, None);
     assert!(loaded.tasks()[0].past_blocks.is_empty());
 
@@ -360,19 +360,19 @@ fn literal_v6_fixture_migrates_to_v14_backs_up_and_round_trips() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v6 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v6 state must serialize as canonical platform v15"
     );
-    let reloaded = store.load().expect("reload v14");
+    let reloaded = store.load().expect("reload v15");
     assert_eq!(
         reloaded.tasks(),
         loaded.tasks(),
-        "v14 round-trips losslessly"
+        "v15 round-trips losslessly"
     );
 }
 
 #[test]
-fn literal_v7_fixture_migrates_to_v14_and_backs_up() {
+fn literal_v7_fixture_migrates_to_v15_and_backs_up() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v7 = include_bytes!("fixtures/current_store_v7.json");
@@ -380,7 +380,7 @@ fn literal_v7_fixture_migrates_to_v14_and_backs_up() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v7 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
         fs::read(dir.join("tsk.json.v7")).expect("read version backup"),
@@ -389,13 +389,13 @@ fn literal_v7_fixture_migrates_to_v14_and_backs_up() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v7 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v7 state must serialize as canonical platform v15"
     );
 }
 
 #[test]
-fn literal_v8_fixture_migrates_to_v14_and_backs_up() {
+fn literal_v8_fixture_migrates_to_v15_and_backs_up() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v8 = include_bytes!("fixtures/current_store_v8.json");
@@ -403,7 +403,7 @@ fn literal_v8_fixture_migrates_to_v14_and_backs_up() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v8 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
         fs::read(dir.join("tsk.json.v8")).expect("read version backup"),
@@ -412,13 +412,13 @@ fn literal_v8_fixture_migrates_to_v14_and_backs_up() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v8 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v8 state must serialize as canonical platform v15"
     );
 }
 
 #[test]
-fn literal_v9_fixture_migrates_to_v14_and_backs_up() {
+fn literal_v9_fixture_migrates_to_v15_and_backs_up() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v9 = include_bytes!("fixtures/current_store_v9.json");
@@ -426,7 +426,7 @@ fn literal_v9_fixture_migrates_to_v14_and_backs_up() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v9 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
         fs::read(dir.join("tsk.json.v9")).expect("read version backup"),
@@ -435,15 +435,15 @@ fn literal_v9_fixture_migrates_to_v14_and_backs_up() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v9 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v9 state must serialize as canonical platform v15"
     );
 }
 
 /// A v10 task runs after nothing: it migrates with an empty `after`, which stays off the wire,
 /// and a link set after migration round-trips.
 #[test]
-fn literal_v10_fixture_migrates_to_v14_backs_up_and_gains_after() {
+fn literal_v10_fixture_migrates_to_v15_backs_up_and_gains_after() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v10 = include_bytes!("fixtures/current_store_v10.json");
@@ -451,7 +451,7 @@ fn literal_v10_fixture_migrates_to_v14_backs_up_and_gains_after() {
     let store = TaskStore::new(&dir);
 
     let mut loaded = store.load().expect("load current v10 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     assert!(loaded.tasks().iter().all(|task| task.after.is_empty()));
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
@@ -461,8 +461,8 @@ fn literal_v10_fixture_migrates_to_v14_backs_up_and_gains_after() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v10 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v10 state must serialize as canonical platform v15"
     );
 
     let prerequisite = loaded
@@ -490,12 +490,12 @@ fn literal_v10_fixture_migrates_to_v14_backs_up_and_gains_after() {
         .expect("number");
     loaded.set_after(waiting, &[number]).expect("set after");
     store.reload_merge_save(&mut loaded).expect("save the link");
-    let reloaded = store.load().expect("reload v14");
+    let reloaded = store.load().expect("reload v15");
     assert_eq!(reloaded.get(waiting).expect("task").after, vec![number]);
 }
 
 #[test]
-fn literal_v11_fixture_migrates_to_v14_and_backs_up() {
+fn literal_v11_fixture_migrates_to_v15_and_backs_up() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v11 = include_bytes!("fixtures/current_store_v11.json");
@@ -503,7 +503,7 @@ fn literal_v11_fixture_migrates_to_v14_and_backs_up() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v11 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
         fs::read(dir.join("tsk.json.v11")).expect("read version backup"),
@@ -512,8 +512,8 @@ fn literal_v11_fixture_migrates_to_v14_and_backs_up() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v11 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v11 state must serialize as canonical platform v15"
     );
 }
 
@@ -552,7 +552,7 @@ fn v9_events_render_without_who_or_what_and_new_events_carry_both() {
     };
     loaded.set_status(task.id, to).expect("status");
     store.save(&loaded).expect("save");
-    let reloaded = store.load().expect("reload v14");
+    let reloaded = store.load().expect("reload v15");
     let event = reloaded.tasks()[0].history.last().cloned().expect("event");
     assert_eq!(event.by.as_deref(), Some("you"));
     assert_eq!(
@@ -595,7 +595,7 @@ fn v8_review_task_without_a_round_migrates_and_reads_as_review() {
         )
         .expect("review");
     store.save(&loaded).expect("save");
-    let reloaded = store.load().expect("reload v14");
+    let reloaded = store.load().expect("reload v15");
     let round = reloaded.tasks()[0].block.clone().expect("open round");
     assert!(round.is_review());
     assert_eq!(round.round, 1);
@@ -603,7 +603,7 @@ fn v8_review_task_without_a_round_migrates_and_reads_as_review() {
     assert_eq!(
         reloaded.tasks()[0].block,
         loaded.tasks()[0].block,
-        "v14 round-trips the round losslessly"
+        "v15 round-trips the round losslessly"
     );
 }
 
@@ -656,7 +656,7 @@ fn v5_batch_undo_round_trips_and_still_reverts_the_whole_completion() {
     let live: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("tsk.json")).expect("read live"))
             .expect("json");
-    assert_eq!(live["format_version"], 14);
+    assert_eq!(live["format_version"], 15);
     assert!(live["undo_stack"][0].get("batch").is_some());
 
     let mut loaded = store.load().expect("load batch undo");
@@ -1268,13 +1268,13 @@ fn reload_merge_save_keeps_a_sibling_writers_project_record_and_applies_the_loca
 fn noncurrent_store_is_refused_without_rewriting_the_file() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
-    let document = serde_json::json!({ "format_version": 15, "next_task_number": 2, "tasks": [], "undo_stack": [] });
+    let document = serde_json::json!({ "format_version": 16, "next_task_number": 2, "tasks": [], "undo_stack": [] });
     let bytes = serde_json::to_vec_pretty(&document).expect("json");
     fs::write(dir.join("tsk.json"), &bytes).expect("write noncurrent store");
     let error = TaskStore::new(&dir)
         .save(&DomainState::new())
         .expect_err("current writer refuses noncurrent store");
-    assert!(error.to_string().contains("expected 14"));
+    assert!(error.to_string().contains("expected 15"));
     assert_eq!(fs::read(dir.join("tsk.json")).expect("read"), bytes);
 }
 
@@ -1299,7 +1299,7 @@ fn v1_migration_strips_defensive_archived_keys() {
     let state = TaskStore::new(&dir)
         .load()
         .expect("load v1 through the chain");
-    assert_eq!(state.format_version(), 14);
+    assert_eq!(state.format_version(), 15);
     let task = state.tasks().first().expect("fixture task");
     assert!(
         !task.archived,
@@ -1313,7 +1313,7 @@ fn v1_migration_strips_defensive_archived_keys() {
 /// an archived project, a batch undo entry) migrates losslessly: the first save writes it back
 /// unchanged but for the version, and backs up the original byte-identically.
 #[test]
-fn populated_v10_fixture_round_trips_losslessly_to_v14() {
+fn populated_v10_fixture_round_trips_losslessly_to_v15() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v10 = include_str!("fixtures/populated_store_v10.json");
@@ -1321,7 +1321,7 @@ fn populated_v10_fixture_round_trips_losslessly_to_v14() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load populated v10 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     let task = loaded
         .tasks()
         .iter()
@@ -1339,7 +1339,7 @@ fn populated_v10_fixture_round_trips_losslessly_to_v14() {
     )
     .expect("json");
     let mut expected: serde_json::Value = serde_json::from_str(v10).expect("json");
-    expected["format_version"] = 14.into();
+    expected["format_version"] = 15.into();
     with_complete_previous_open(&mut expected);
     assert_eq!(
         saved, expected,
@@ -1374,7 +1374,7 @@ fn with_complete_previous_open(document: &mut serde_json::Value) {
 /// record's unblock or send-back delivers them, and the first save writes the document back
 /// unchanged but for the version after backing up the original byte-identically.
 #[test]
-fn v11_replies_migrate_to_v14_as_not_yet_sent() {
+fn v11_replies_migrate_to_v15_as_not_yet_sent() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let mut document: serde_json::Value =
@@ -1389,7 +1389,7 @@ fn v11_replies_migrate_to_v14_as_not_yet_sent() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load v11");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     let replies: Vec<_> = loaded
         .tasks()
         .iter()
@@ -1425,7 +1425,7 @@ fn v11_replies_migrate_to_v14_as_not_yet_sent() {
     )
     .expect("json");
     let mut expected = document;
-    expected["format_version"] = 14.into();
+    expected["format_version"] = 15.into();
     with_complete_previous_open(&mut expected);
     assert_eq!(
         saved, expected,
@@ -1434,10 +1434,10 @@ fn v11_replies_migrate_to_v14_as_not_yet_sent() {
 }
 
 /// A v12 done's undo entry records no previous status: it migrates as `open`, so undo goes
-/// back to the inbox as it did before, and the first save writes the canonical v14 wire after
+/// back to the inbox as it did before, and the first save writes the canonical v15 wire after
 /// backing up the original byte-identically.
 #[test]
-fn literal_v12_fixture_migrates_to_v14_and_its_done_undoes_to_open() {
+fn literal_v12_fixture_migrates_to_v15_and_its_done_undoes_to_open() {
     let dir = temp_state_dir();
     let _guard = TempDirGuard(dir.clone());
     let v12 = include_bytes!("fixtures/current_store_v12.json");
@@ -1449,7 +1449,7 @@ fn literal_v12_fixture_migrates_to_v14_and_its_done_undoes_to_open() {
     let store = TaskStore::new(&dir);
 
     let loaded = store.load().expect("load current v12 fixture");
-    assert_eq!(loaded.format_version(), 14);
+    assert_eq!(loaded.format_version(), 15);
     store.save(&loaded).expect("save migrated state");
     assert_eq!(
         fs::read(dir.join("tsk.json.v12")).expect("read version backup"),
@@ -1458,11 +1458,11 @@ fn literal_v12_fixture_migrates_to_v14_and_its_done_undoes_to_open() {
     );
     assert_eq!(
         fs::read(dir.join("tsk.json")).expect("read migrated live document"),
-        platform_v14_fixture().as_slice(),
-        "a v12 state must serialize as canonical platform v14"
+        platform_v15_fixture().as_slice(),
+        "a v12 state must serialize as canonical platform v15"
     );
 
-    let mut reloaded = store.load().expect("reload v14");
+    let mut reloaded = store.load().expect("reload v15");
     let id = reloaded.tasks()[0].id;
     assert_eq!(
         reloaded.get(id).expect("fixture task").status,
@@ -1477,7 +1477,7 @@ fn literal_v12_fixture_migrates_to_v14_and_its_done_undoes_to_open() {
 }
 
 /// A v13 assignee and its assignment undo carry no kind: both read as an agent profile, the
-/// only kind there was, so a migrated task still dispatches. The first save writes v14 with no
+/// only kind there was, so a migrated task still dispatches. The first save writes v15 with no
 /// kind keys at all, and a person assignee round-trips with its kind.
 #[test]
 fn v13_assignees_migrate_as_agents_and_a_person_round_trips() {
@@ -1510,7 +1510,7 @@ fn v13_assignees_migrate_as_agents_and_a_person_round_trips() {
         loaded.get(id).expect("task").agent_assignee(),
         Some("claude")
     );
-    store.save(&loaded).expect("save v14");
+    store.save(&loaded).expect("save v15");
     let live = fs::read_to_string(dir.join("tsk.json")).expect("read live");
     assert!(!live.contains("assignee_kind"), "{live}");
     assert!(!live.contains("previous_kind"), "{live}");
@@ -1531,4 +1531,418 @@ fn v13_assignees_migrate_as_agents_and_a_person_round_trips() {
         Some(tsk_tui::domain::Assignee::person("dana"))
     );
     assert_eq!(reloaded.get(id).expect("task").agent_assignee(), None);
+}
+
+/// A v14 document hides no name: it loads as v15, backs up byte-identically, and saves as the
+/// canonical v15 wire. A hidden name then round-trips, and its undo survives the reload.
+#[test]
+fn literal_v14_fixture_migrates_to_v15_and_a_hidden_name_round_trips() {
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let v14 = include_bytes!("fixtures/current_store_v14.json");
+    fs::write(dir.join("tsk.json"), v14).expect("install v14 fixture");
+    let store = TaskStore::new(&dir);
+
+    let mut loaded = store.load().expect("load v14");
+    assert_eq!(loaded.format_version(), 15);
+    assert!(loaded.hidden_assignees().is_empty());
+    store.save(&loaded).expect("save migrated state");
+    assert_eq!(
+        fs::read(dir.join("tsk.json.v14")).expect("read version backup"),
+        v14.as_slice(),
+        "the v14 original is backed up byte-identically"
+    );
+    assert_eq!(
+        fs::read(dir.join("tsk.json")).expect("read migrated live document"),
+        platform_v15_fixture().as_slice(),
+        "a v14 state must serialize as canonical platform v15"
+    );
+
+    assert!(loaded.hide_assignee("dnaa"));
+    store.save(&loaded).expect("save the hidden name");
+    let live: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("tsk.json")).expect("read live"))
+            .expect("json");
+    assert_eq!(live["hidden_assignees"], serde_json::json!(["dnaa"]));
+    let top = live["undo_stack"]
+        .as_array()
+        .and_then(|stack| stack.last())
+        .expect("an undo entry");
+    assert_eq!(top["hide_assignee"]["name"], "dnaa");
+
+    let mut reloaded = store.load().expect("reload v15");
+    assert!(reloaded.hidden_assignees().contains("dnaa"));
+    reloaded.undo().expect("undo the hide");
+    assert!(reloaded.hidden_assignees().is_empty());
+}
+
+/// Two writers: a hide and an unhide this process has not saved yet survive a merge with a
+/// disk copy another writer saved meanwhile, and the other writer's hide is kept.
+#[test]
+fn reload_merge_save_keeps_hidden_names_from_both_writers() {
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut seed = DomainState::new();
+    let id = seed
+        .create(
+            "Seed",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create seed task");
+    store.save(&seed).expect("seed");
+
+    let mut a = store.load().expect("stale writer A");
+    let mut b = store.load().expect("writer B");
+    b.hide_assignee("sam");
+    store.save(&b).expect("B hides sam");
+
+    a.hide_assignee("dana");
+    store.reload_merge_save(&mut a).expect("A merge-save");
+    let disk = store.load().expect("reload");
+    assert_eq!(
+        disk.hidden_assignees(),
+        &std::collections::BTreeSet::from(["dana".to_string(), "sam".to_string()]),
+        "both hides are on disk"
+    );
+
+    // A assigns sam again, which unhides it: a plain union with disk would bring it back.
+    a.assign(id, Some(tsk_tui::domain::Assignee::person("sam")))
+        .expect("assign sam");
+    store
+        .reload_merge_save(&mut a)
+        .expect("A merge-save unhide");
+    let disk = store.load().expect("reload");
+    assert_eq!(
+        disk.hidden_assignees(),
+        &std::collections::BTreeSet::from(["dana".to_string()]),
+        "the unhide wins over the disk copy"
+    );
+}
+
+/// Assigning a removed name puts it back on the list inside the assignment's undo: one `ctrl+u`
+/// unassigns and hides it again, and the next undoes the removal, across saves. Assigning a
+/// name the task already has only shows it again, as its own undo entry; with the name shown
+/// already, it records nothing.
+#[test]
+fn assigning_a_removed_name_shows_it_inside_the_assignment_undo() {
+    use tsk_tui::domain::Assignee;
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut state = DomainState::new();
+    let kept = state
+        .create(
+            "Kept",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    let fresh = state
+        .create(
+            "Fresh",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    state
+        .assign(kept, Some(Assignee::person("dana")))
+        .expect("assign dana");
+    assert!(state.hide_assignee("dana"));
+    store.reload_merge_save(&mut state).expect("save the hide");
+
+    state
+        .assign(fresh, Some(Assignee::person("dana")))
+        .expect("assign dana again");
+    assert!(state.hidden_assignees().is_empty());
+    store
+        .reload_merge_save(&mut state)
+        .expect("save the assignment");
+    let mut state = store.load().expect("reload");
+    state.undo().expect("undo the assignment");
+    assert_eq!(state.get(fresh).expect("task").assignee, None);
+    assert!(state.hidden_assignees().contains("dana"), "hidden again");
+    store.reload_merge_save(&mut state).expect("save the undo");
+    let mut state = store.load().expect("reload");
+    state.undo().expect("undo the removal");
+    assert!(
+        state.hidden_assignees().is_empty(),
+        "the removal undoes next"
+    );
+
+    // The task already has the name: only the list changes, and undo hides it again.
+    assert!(state.hide_assignee("dana"));
+    let before = undo_top(&state);
+    assert!(state
+        .assign(kept, Some(Assignee::person("dana")))
+        .expect("same name"));
+    assert!(state.hidden_assignees().is_empty());
+    state.undo().expect("undo the re-show");
+    assert!(state.hidden_assignees().contains("dana"));
+    assert_eq!(undo_top(&state), before, "nothing else undone");
+    state.undo().expect("undo the removal");
+    let top = undo_top(&state);
+    assert!(!state
+        .assign(kept, Some(Assignee::person("dana")))
+        .expect("nothing to do"));
+    assert_eq!(undo_top(&state), top, "no entry for no change");
+}
+
+/// An undone removal stays undone through a save: the disk copy of its entry is not merged
+/// back, so a later `ctrl+u` has nothing to replay.
+#[test]
+fn an_undone_removal_is_not_merged_back_from_disk() {
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut state = DomainState::new();
+    assert!(state.hide_assignee("dnaa"));
+    store.reload_merge_save(&mut state).expect("save the hide");
+    state.undo().expect("undo the hide");
+    store.reload_merge_save(&mut state).expect("save the undo");
+    assert_eq!(undo_top(&state), serde_json::Value::Null);
+    state.undo().expect("nothing to undo");
+    assert!(state.hidden_assignees().is_empty());
+    assert_eq!(
+        undo_top(&store.load().expect("reload")),
+        serde_json::Value::Null
+    );
+}
+
+/// Every way of assigning a person puts a removed name back: a new task, the CLI edit, and the
+/// task page's edit.
+#[test]
+fn every_assignment_path_shows_a_removed_name() {
+    use tsk_tui::domain::Assignee;
+    let dana = || Some(Assignee::person("dana"));
+    let mut state = DomainState::new();
+    assert!(state.hide_assignee("dana"));
+    state
+        .create_configured(
+            "New",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+            dana(),
+            None,
+        )
+        .expect("create");
+    assert!(state.hidden_assignees().is_empty(), "create");
+
+    let id = state
+        .create(
+            "Edited",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    assert!(state.hide_assignee("dana"));
+    state
+        .edit_with_assignee_and_base(id, "Edited", None, TaskScope::Global, None, dana(), None)
+        .expect("cli edit");
+    assert!(state.hidden_assignees().is_empty(), "cli edit");
+
+    let id = state
+        .create(
+            "Paged",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    assert!(state.hide_assignee("dana"));
+    state
+        .edit_with_step_changes_and_base(
+            id,
+            "Paged",
+            None,
+            TaskScope::Global,
+            None,
+            dana(),
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .expect("page edit");
+    assert!(state.hidden_assignees().is_empty(), "page edit");
+}
+
+/// Two boards: one removes a name and saves, the other (loaded before) assigns that name and
+/// merge-saves. The assignment wins: the name is back on the list on disk.
+#[test]
+fn an_assignment_merged_after_another_writers_removal_shows_the_name() {
+    use tsk_tui::domain::Assignee;
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut seed = DomainState::new();
+    let id = seed
+        .create(
+            "Seed",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    store.save(&seed).expect("seed");
+
+    let mut a = store.load().expect("writer A");
+    let mut b = store.load().expect("writer B");
+    assert!(b.hide_assignee("dana"));
+    store.save(&b).expect("B hides dana");
+
+    a.assign(id, Some(Assignee::person("dana")))
+        .expect("A assigns dana");
+    store.reload_merge_save(&mut a).expect("A merge-save");
+    assert!(
+        store.load().expect("reload").hidden_assignees().is_empty(),
+        "the assignment shows the name again"
+    );
+}
+
+/// The top undo entry as stored, or null.
+fn undo_top(state: &DomainState) -> serde_json::Value {
+    serde_json::to_value(state).expect("state serializes")["undo_stack"]
+        .as_array()
+        .and_then(|stack| stack.last().cloned())
+        .unwrap_or_default()
+}
+
+/// Removing a name again after an assignment re-showed it keeps that assignment undoable
+/// through a save: `ctrl+u` undoes the removal, then the assignment.
+#[test]
+fn removing_a_reshown_name_keeps_the_assignment_undoable_across_a_save() {
+    use tsk_tui::domain::Assignee;
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut state = DomainState::new();
+    let id = state
+        .create(
+            "T5",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    assert!(state.hide_assignee("dnaa"));
+    store.reload_merge_save(&mut state).expect("save the hide");
+    state
+        .assign(id, Some(Assignee::person("dnaa")))
+        .expect("assign dnaa");
+    assert!(state.hide_assignee("dnaa"), "removed again");
+    store.reload_merge_save(&mut state).expect("save");
+    let mut state = store.load().expect("reload");
+
+    state.undo().expect("undo the second removal");
+    assert!(state.hidden_assignees().is_empty());
+    assert_eq!(
+        state.get(id).expect("task").assigned(),
+        Some(Assignee::person("dnaa"))
+    );
+    state.undo().expect("undo the assignment");
+    assert_eq!(state.get(id).expect("task").assignee, None, "unassigned");
+}
+
+/// Editing a task that already carries a removed name, from the task page or `tsk edit
+/// --title`, leaves the name off the list: only a change to that name shows it.
+#[test]
+fn editing_a_task_that_keeps_a_removed_name_leaves_it_hidden() {
+    use tsk_tui::domain::Assignee;
+    let dnaa = || Some(Assignee::person("dnaa"));
+    let mut state = DomainState::new();
+    let id = state
+        .create(
+            "T11",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    state.assign(id, dnaa()).expect("assign");
+    assert!(state.hide_assignee("dnaa"));
+    state
+        .edit_with_step_changes_and_base(
+            id,
+            "T11",
+            Some("new notes".into()),
+            TaskScope::Global,
+            None,
+            dnaa(),
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .expect("page edit");
+    assert!(state.hidden_assignees().contains("dnaa"), "page edit");
+    state
+        .edit_with_assignee_and_base(
+            id,
+            "T11 renamed",
+            None,
+            TaskScope::Global,
+            None,
+            dnaa(),
+            None,
+        )
+        .expect("cli edit");
+    assert!(state.hidden_assignees().contains("dnaa"), "cli edit");
+}
+
+/// Another writer removing the name while this one's assignment re-showed it keeps that
+/// assignment's undo on disk: its stale name step does not keep the merge from taking it.
+#[test]
+fn a_concurrent_removal_keeps_the_other_writers_assignment_undo() {
+    use tsk_tui::domain::Assignee;
+    let dir = temp_state_dir();
+    let _guard = TempDirGuard(dir.clone());
+    let store = TaskStore::new(&dir);
+    let mut seed = DomainState::new();
+    let id = seed
+        .create(
+            "T5",
+            None,
+            TaskScope::Global,
+            ProvenanceOrigin::Manual,
+            None,
+        )
+        .expect("create");
+    assert!(seed.hide_assignee("dnaa"));
+    store.save(&seed).expect("seed");
+
+    let mut a = store.load().expect("writer A");
+    let mut b = store.load().expect("writer B");
+    a.assign(id, Some(Assignee::person("dnaa")))
+        .expect("A assigns dnaa");
+    store.reload_merge_save(&mut a).expect("A saves");
+    b.undo().expect("B undoes the seed hide");
+    assert!(b.hide_assignee("dnaa"), "B removes it again");
+    store.reload_merge_save(&mut b).expect("B merge-saves");
+
+    let mut disk = store.load().expect("reload");
+    disk.undo().expect("undo B's removal");
+    disk.undo().expect("undo A's assignment");
+    assert_eq!(
+        disk.get(id).expect("task").assignee,
+        None,
+        "A's assignment undone"
+    );
 }

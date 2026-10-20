@@ -1,5 +1,6 @@
 //! Undo stack for soft-delete, complete, status changes, steps, archive, assignment, base,
-//! block, who a block or review waits on, `after`, and a start that dispatched.
+//! block, who a block or review waits on, `after`, a start that dispatched, and a name removed
+//! from the assignee picker.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -91,6 +92,16 @@ pub enum UndoEntry {
         previous: BlockOn,
         expected_revision: Uuid,
     },
+    /// A person name removed from the assignee picker; reversing puts it back. It targets no
+    /// task, so no revision guard applies.
+    HideAssignee {
+        name: String,
+    },
+    /// An assignment put a removed name back on the picker; reversing hides it again. It rides
+    /// in the assignment's entry, or alone when the assignment changed nothing else.
+    ShowAssignee {
+        name: String,
+    },
     Batch {
         entries: Vec<UndoEntry>,
     },
@@ -116,7 +127,9 @@ impl UndoEntry {
                 | UndoEntry::Steps { .. }
                 | UndoEntry::Archive { .. }
                 | UndoEntry::SetAfter { .. }
-                | UndoEntry::SetOn { .. } => leaves.push(entry),
+                | UndoEntry::SetOn { .. }
+                | UndoEntry::HideAssignee { .. }
+                | UndoEntry::ShowAssignee { .. } => leaves.push(entry),
             }
         }
 
@@ -128,7 +141,7 @@ impl UndoEntry {
     pub(crate) fn targets(&self) -> Vec<(Uuid, Uuid)> {
         self.leaf_entries()
             .into_iter()
-            .map(|entry| match *entry {
+            .filter_map(|entry| match *entry {
                 UndoEntry::SoftDelete {
                     id,
                     expected_revision,
@@ -182,7 +195,8 @@ impl UndoEntry {
                     id,
                     expected_revision,
                     ..
-                } => (id, expected_revision),
+                } => Some((id, expected_revision)),
+                UndoEntry::HideAssignee { .. } | UndoEntry::ShowAssignee { .. } => None,
                 UndoEntry::Batch { .. } => unreachable!("batches are flattened"),
             })
             .collect()
@@ -254,6 +268,7 @@ impl UndoEntry {
                     *expected_revision = to;
                 }
             }
+            UndoEntry::HideAssignee { .. } | UndoEntry::ShowAssignee { .. } => {}
         }
     }
 
@@ -276,6 +291,14 @@ impl UndoEntry {
             UndoEntry::Archive { id, previous, .. } => state.restore_archived(id, previous),
             UndoEntry::SetAfter { id, previous, .. } => state.restore_after(id, previous),
             UndoEntry::SetOn { id, previous, .. } => state.restore_on(id, previous),
+            UndoEntry::HideAssignee { name } => {
+                state.unhide_assignee(&name);
+                Ok(())
+            }
+            UndoEntry::ShowAssignee { name } => {
+                state.rehide_assignee(&name);
+                Ok(())
+            }
             UndoEntry::Batch { entries } => {
                 for entry in entries.into_iter().rev() {
                     entry.reverse(state)?;
