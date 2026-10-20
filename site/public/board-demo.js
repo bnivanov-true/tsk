@@ -2148,6 +2148,8 @@ import { parseCapture } from "./capture.js";
   // click runs; an entry without one only informs.
   const verb = (key, label, shed, id = null) => ({ key, label, shed, id });
   const HELP = verb("?", "help", 0, "help");
+  // Essential like `? help`, but the first to go when even the essentials overflow.
+  const COMMANDS = verb(":", "commands", 0, "palette");
   const ADD = verb("+", "add", 1, "capture");
   const OPEN = verb("enter", "open", 0, "open");
   const UNDO = verb("u", "undo", 0, "undo");
@@ -2173,7 +2175,7 @@ import { parseCapture } from "./capture.js";
   }
 
   // The board's verb bar for a seat (the outer board or the project preview): what you are
-  // most likely to do next from the cursor, then the way out, then `? help`.
+  // most likely to do next from the cursor, then the way out, then `: commands · ? help`.
   function boardVerbs(form = state) {
     const rows = form === preview ? previewRows() : buildRows();
     const row = rows.find(
@@ -2182,7 +2184,7 @@ import { parseCapture } from "./capture.js";
     // After a delete the bar leads with its undo, while that undo is still the one `u` runs.
     const undo = form.undo?.kind === "delete" ? [UNDO] : [];
     if (form === state && projectsOverview())
-      return [...undo, OPEN, verb("/", "search", 1, "search"), HELP];
+      return [...undo, OPEN, verb("/", "search", 1, "search"), COMMANDS, HELP];
     // A header holds the cursor: it folds with ←, unfolds with →, and a sub-header that
     // names a board opens it.
     const folded = headerFolded(row, form);
@@ -2195,6 +2197,7 @@ import { parseCapture } from "./capture.js";
           ? verb("→", "unfold", 1, "unfold")
           : verb("←", "fold", 1, "fold"),
         ADD,
+        COMMANDS,
         HELP,
       ];
     }
@@ -2206,20 +2209,22 @@ import { parseCapture } from "./capture.js";
         UNDO,
         ...(task ? [OPEN, ...statusVerbs(task.status).slice(0, 1)] : []),
         ADD,
+        COMMANDS,
         HELP,
       ];
-    if (!task) return [HELP];
+    if (!task) return [COMMANDS, HELP];
     return [
       OPEN,
       ...statusVerbs(task.status),
       // The in-motion and done bars spend that seat on their lifecycle verbs.
       ...(["started", "done"].includes(task.status) ? [] : [ADD]),
+      COMMANDS,
       HELP,
     ];
   }
 
-  // The task page's verb bar: edit, the task's own status verbs, the way out. An open editor
-  // or an unsaved step session shows its save and cancel keys instead.
+  // The task page's verb bar: edit, the task's own status verbs, the way out, `: commands`.
+  // An open editor or an unsaved step session shows its save and cancel keys instead.
   function pageVerbs(task, pageSteps, editing) {
     if (pageSteps.editor)
       return [
@@ -2238,12 +2243,14 @@ import { parseCapture } from "./capture.js";
         verb("shift+enter", "save", 0),
         verb("a", "add step", 1),
         verb("esc", "cancel", 0),
+        COMMANDS,
       ];
-    if (!task) return [verb("esc", "close", 0, "close")];
+    if (!task) return [verb("esc", "close", 0, "close"), COMMANDS];
     return [
       verb("e", "edit", 0, "edit"),
       ...statusVerbs(task.status),
       verb("esc", "close", 0, "close"),
+      COMMANDS,
     ];
   }
 
@@ -2254,18 +2261,23 @@ import { parseCapture } from "./capture.js";
 
   // Which entries a footer row keeps, as the app's fit_verbs decides: at most 7 entries (5
   // below 78 columns), then full labels, then short ones, then one whole entry dropped by
-  // `shed` and both measured again. Essentials that still do not fit lose the padding and
-  // the ` · ` separators, then drop from the right. Entries are whole or absent, never cut.
+  // `shed` and both measured again. Essentials that still do not fit lose `: commands`, then
+  // the padding and the ` · ` separators, then drop from the right. Entries are whole or
+  // absent, never cut.
   function fitVerbs(entries, width) {
     const budget = width >= 78 ? 7 : 5;
     const cells = (text) => [...text].length;
+    // The app paints a mutating key as `ctrl+<key>`: measure it so, and the demo's bare-key
+    // bar sheds exactly what the app's does.
+    const keyCells = (key) =>
+      cells(key) + (/^[sdobrxaeunfgq]$/.test(key) ? 5 : 0);
     const painted = (kept, compact, tight) =>
       (tight ? 0 : 1) +
       kept.reduce((sum, index) => {
         const { key, label } = entries[index];
         return (
           sum +
-          cells(key) +
+          keyCells(key) +
           1 +
           cells(compact ? compactVerbLabel(label) : label)
         );
@@ -2281,13 +2293,27 @@ import { parseCapture } from "./capture.js";
       if (at >= 0) kept.splice(at, 1);
       return at >= 0;
     };
-    const kept = entries.map((_, index) => index);
-    while (kept.length > budget && shedOne(kept));
-    for (;;) {
-      for (const compact of [false, true])
-        if (painted(kept, compact, false) <= width)
-          return { kept, compact, tight: false };
-      if (!shedOne(kept)) break;
+    // Budget, then full labels, then short ones, then one shed at a time; `kept` is left
+    // holding the essentials that still overflow.
+    const shedToFit = (kept) => {
+      while (kept.length > budget && shedOne(kept));
+      for (;;) {
+        for (const compact of [false, true])
+          if (painted(kept, compact, false) <= width)
+            return { kept, compact, tight: false };
+        if (!shedOne(kept)) return null;
+      }
+    };
+    const all = entries.map((_, index) => index);
+    let kept = [...all];
+    let fit = shedToFit(kept);
+    if (fit) return fit;
+    // Overflowing essentials give up `: commands`, and the fit runs again from the whole
+    // row, so a seat shed only to make room for it comes back.
+    if (kept.some((index) => entries[index] === COMMANDS)) {
+      kept = all.filter((index) => entries[index] !== COMMANDS);
+      fit = shedToFit(kept);
+      if (fit) return fit;
     }
     while (kept.length && painted(kept, true, true) > width) kept.pop();
     return { kept, compact: true, tight: true };
@@ -2341,35 +2367,46 @@ import { parseCapture } from "./capture.js";
     if (id === "file") fileSelected();
   }
 
+  // A status command acts on the task the keys belong to: the project preview's when it
+  // owns them, as the app's palette acts on its focused column.
+  const paletteStatus = (status) =>
+    projectsPreviewFocused() || projectsPreviewPage()
+      ? previewSetStatus(status)
+      : setStatus(status);
+
   function paletteCommands() {
     const q = state.paletteQ.trim().toLowerCase();
     const all = [
       {
         id: "open",
         label: "set status: open",
-        run: () => setStatus("open"),
+        run: () => paletteStatus("open"),
       },
       {
         id: "ready",
         label: "set status: ready",
-        run: () => setStatus("ready"),
+        run: () => paletteStatus("ready"),
       },
       {
         id: "started",
         label: "set status: started",
-        run: () => setStatus("started"),
+        run: () => paletteStatus("started"),
       },
       {
         id: "blocked",
         label: "set status: blocked",
-        run: () => setStatus("blocked"),
+        run: () => paletteStatus("blocked"),
       },
       {
         id: "review",
         label: "set status: review",
-        run: () => setStatus("review"),
+        run: () => paletteStatus("review"),
       },
-      { id: "done", label: "set status: done", run: () => setStatus("done") },
+      {
+        id: "done",
+        label: "set status: done",
+        run: () => paletteStatus("done"),
+      },
       { id: "desk", label: "go desk", run: () => goTab("desk") },
       { id: "projects", label: "go projects", run: () => goTab("projects") },
       {
@@ -3597,6 +3634,12 @@ import { parseCapture } from "./capture.js";
       leaveTaskPage();
       return;
     }
+    if (id === "palette") {
+      state.overlay = "palette";
+      state.paletteQ = "";
+      state.paletteI = 0;
+      return;
+    }
     clearMarks();
     enterTaskStage();
     const task = selectedTask();
@@ -3625,6 +3668,12 @@ import { parseCapture } from "./capture.js";
   function runPreviewPageVerb(id) {
     if (id === "close") {
       leavePreviewTaskPage();
+      return;
+    }
+    if (id === "palette") {
+      state.overlay = "palette";
+      state.paletteQ = "";
+      state.paletteI = 0;
       return;
     }
     clearMarks(preview);
@@ -3663,6 +3712,11 @@ import { parseCapture } from "./capture.js";
     if (id === "help") {
       state.overlay = "help";
       state.helpQ = "";
+    }
+    if (id === "palette") {
+      state.overlay = "palette";
+      state.paletteQ = "";
+      state.paletteI = 0;
     }
   }
 
@@ -4502,7 +4556,9 @@ import { parseCapture } from "./capture.js";
   }
 
   function handlePreviewPageKey(e) {
-    if (!projectsPreviewPage()) return false;
+    // An open Help or palette owns the keys, as it does over any other page.
+    if (!projectsPreviewPage() || ["help", "palette"].includes(state.overlay))
+      return false;
     const task = previewTask();
     const bare = !e.ctrlKey && !e.metaKey && !e.altKey;
     if (preview.editField) {
@@ -4677,6 +4733,14 @@ import { parseCapture } from "./capture.js";
       e.preventDefault();
       state.overlay = "help";
       state.helpQ = "";
+      render();
+      return true;
+    }
+    if (bare && e.key === ":") {
+      e.preventDefault();
+      state.overlay = "palette";
+      state.paletteQ = "";
+      state.paletteI = 0;
       render();
       return true;
     }

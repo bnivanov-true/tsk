@@ -666,10 +666,19 @@ pub struct VerbEntry<'a> {
     pub key: &'a str,
     pub label: &'a str,
     /// How readily the entry leaves a footer too narrow for it ([`fit_verbs`]). `0` is
-    /// essential (the primary action, save, the way out, `? help`) and stays; otherwise the
+    /// essential (the primary action, save, the way out, `? help`) and stays (all but
+    /// [`COMMANDS_VERB`], which goes when the essentials overflow); otherwise the
     /// highest number goes first, the rightmost among equals.
     pub shed: u8,
 }
+
+/// `: commands`, the palette's footer seat beside `? help`. It is essential like `? help`, but a
+/// footer too narrow for its essentials drops it first ([`fit_verbs`]).
+pub const COMMANDS_VERB: VerbEntry<'static> = VerbEntry {
+    key: ":",
+    label: "commands",
+    shed: 0,
+};
 
 /// One palette command row for overlay paint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7087,8 +7096,8 @@ struct FittedVerbs {
 /// of padding. Every footer, verb bar and card legend alike, goes through here: at most
 /// `budget` entries, then full labels, then short labels, then one whole entry dropped by
 /// [`VerbEntry::shed`] and both label lengths measured again, until the row fits.
-/// Essentials that still do not fit lose the padding and separators, and below that only
-/// the leading essentials that fit whole remain.
+/// Essentials that still do not fit lose `: commands` ([`COMMANDS_VERB`]), then the padding
+/// and separators, and below that only the leading essentials that fit whole remain.
 fn fit_verbs(
     entries: &[VerbEntry<'_>],
     keys: &[String],
@@ -7127,21 +7136,42 @@ fn fit_verbs(
         next.map(|position| kept.remove(position)).is_some()
     };
 
-    let mut kept: Vec<usize> = (0..entries.len()).collect();
-    while kept.len() > budget && shed_one(&mut kept) {}
-    loop {
-        for compact in [false, true] {
-            if painted(&kept, compact, false) <= width {
-                return FittedVerbs {
-                    kept,
-                    compact,
-                    tight: false,
-                };
+    // Budget, then full labels, then short labels, then one shed at a time. `Err` carries the
+    // essentials that still overflow.
+    let shed_to_fit = |mut kept: Vec<usize>| -> Result<FittedVerbs, Vec<usize>> {
+        while kept.len() > budget && shed_one(&mut kept) {}
+        loop {
+            for compact in [false, true] {
+                if painted(&kept, compact, false) <= width {
+                    return Ok(FittedVerbs {
+                        kept,
+                        compact,
+                        tight: false,
+                    });
+                }
+            }
+            if !shed_one(&mut kept) {
+                return Err(kept);
             }
         }
-        if !shed_one(&mut kept) {
-            break;
-        }
+    };
+
+    let all: Vec<usize> = (0..entries.len()).collect();
+    let mut kept = match shed_to_fit(all.clone()) {
+        Ok(fit) => return fit,
+        Err(kept) => kept,
+    };
+    // Essentials that overflow give up `: commands` first, and the fit runs again from the
+    // whole row, so a seat shed only to make room for it comes back.
+    if kept.iter().any(|&index| entries[index] == COMMANDS_VERB) {
+        let without: Vec<usize> = all
+            .into_iter()
+            .filter(|&index| entries[index] != COMMANDS_VERB)
+            .collect();
+        kept = match shed_to_fit(without) {
+            Ok(fit) => return fit,
+            Err(kept) => kept,
+        };
     }
     while !kept.is_empty() && painted(&kept, true, true) > width {
         kept.pop();
@@ -7393,6 +7423,52 @@ mod tests {
         );
         let (_, hits) = paint_verb_bar(STARTED_BAR, 7, 40, true);
         assert_eq!(hits.last(), Some(&(5, 28, 6)));
+    }
+
+    #[test]
+    fn commands_sits_before_help_stays_through_sheds_and_drops_first_when_essentials_overflow() {
+        const BAR: &[VerbEntry<'static>] = &[
+            verb("enter", "open", 0),
+            verb("d", "done", 1),
+            verb("n", "next", 1),
+            verb("o", "inbox", 1),
+            verb("b", "block", 1),
+            COMMANDS_VERB,
+            verb("?", "help", 0),
+        ];
+        let bar = |budget: usize, width: u16| plain(&paint_verb_bar(BAR, budget, width, true).0);
+        assert_eq!(
+            bar(7, 120),
+            " enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · ctrl+b block · : commands · ? help"
+        );
+        // The compact budget and a narrow row shed status verbs, never `: commands`.
+        assert_eq!(
+            bar(5, 120),
+            " enter open · ctrl+d done · ctrl+n next · : commands · ? help"
+        );
+        assert_eq!(bar(7, 33), " enter open · : commands · ? help");
+        // Below the essentials: `: commands` goes before `? help`, then the separators.
+        assert_eq!(bar(7, 32), " enter open · ? help");
+        assert_eq!(bar(7, 19), "enter open ? help");
+        assert_eq!(bar(7, 16), "enter open");
+        // A seat shed only to make room for `: commands` comes back once it goes: the armed
+        // undo bar on a group header keeps `← fold` at 44 columns.
+        const HEADER: &[VerbEntry<'static>] = &[
+            verb("u", "undo", 0),
+            verb("enter", "open", 0),
+            verb("←", "fold", 1),
+            verb("+", "add", 1),
+            COMMANDS_VERB,
+            verb("?", "help", 0),
+        ];
+        assert_eq!(
+            plain(&paint_verb_bar(HEADER, 7, 44, true).0),
+            " ctrl+u undo · enter open · ← fold · ? help"
+        );
+        // A click on `: commands` names its declared entry.
+        let (_, hits) = paint_verb_bar(BAR, 7, 33, true);
+        let indices: Vec<usize> = hits.iter().map(|(index, _, _)| *index).collect();
+        assert_eq!(indices, vec![0, 5, 6]);
     }
 
     #[test]
