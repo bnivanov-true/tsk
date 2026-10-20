@@ -11,7 +11,12 @@ use crate::cli::guide::SKILL_MD;
 const SKILL_FOLDER: &str = "tsk-cli";
 const SKILL_FILE: &str = "SKILL.md";
 
-pub const USAGE: &str = "usage: tsk setup [herdr | agents | claude | pi | omp | cursor | grok | codex | opencode | --skill-dir <path>] [--yes] [--force] [--json]\n       tsk setup --detected-ids | --skill-states\n       tsk setup herdr --check";
+pub const USAGE: &str = "usage: tsk setup [--json]
+       tsk setup herdr [--check]
+       tsk setup agents [--yes [--force]] [--json]
+       tsk setup <agent> [--force] [--json]
+       tsk setup --skill-dir <path> [--force] [--json]
+       tsk setup --detected-ids | --skill-states";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -1158,7 +1163,7 @@ mod tests {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         assert_eq!(
-            hash, 0x6b44_f9b8_994e_7362,
+            hash, 0x130a_3fd0_0a9e_c833,
             "skills/tsk-cli/SKILL.md changed: refresh this hash pin, and bump `version:` only if this is the first skill edit since the last release"
         );
     }
