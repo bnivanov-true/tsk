@@ -15,7 +15,7 @@ tsk list
 | Command | Does |
 | --- | --- |
 | `tsk` | Open the board |
-| `tsk capture` | Open [quick capture](/docs/capture/); saving or discarding exits |
+| `tsk capture [--state-dir <dir>]` | Open [quick capture](/docs/capture/); saving or discarding exits. Any other argument is a usage error, exit 2 |
 | [`tsk add`](#add) | Add a task, or every task in a JSON plan |
 | [`tsk list`](#list) | Read tasks |
 | [`tsk status`](#status) | Set a task's status, block it, or put it up for review |
@@ -587,7 +587,7 @@ tsk trash restore <task> [--state-dir <dir>]
 
 A deleted task first stays on the board, where undo brings it back. It moves to trash later ([deleted tasks](/docs/storage/#deleted-tasks)). A task that is not in trash refuses: `T12 is not in trash`. `tsk list --deleted` shows both kinds.
 
-Output is `restored T12 <title>`.
+Output is `restored T12 <title>`. When another task already holds that number, the task takes the next free one: `restored T52 <title> (was T12: another task holds that number)`.
 
 **Refusals:** a message with no code, exit 1 ([exit contract](#exit-contract)).
 
