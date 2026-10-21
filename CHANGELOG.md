@@ -64,6 +64,7 @@ first added in the same Unreleased section is not an entry: edit that entry inst
 - `tsk steps` takes `--` before step text that starts with `-`, as `tsk reply` does.
 - `tsk trash restore` gives a task the next free number when another task holds its old one, so no two tasks share a number.
 - `tsk capture --state-dir <dir>` saves into that store instead of the default one; any other argument is refused.
+- Notes keep underscores inside words, such as `file_name`, instead of turning them into emphasis.
 
 ## v0.12.0
 
