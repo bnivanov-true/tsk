@@ -6,6 +6,7 @@
 │                                                                                                              │
 │ ▾ herdr · 2                                                                                                  │
 │▸ ■ T5 Wire dispatch cleanup receipts  #dispatch                                                              │
+│    └─ @claude: Which receipt format? · 41m                                                                   │
 │  ▲ T6 Docs refresh pass after F9 ships                                                                       │
 │                                                                                                              │
 │ IN MOTION ─────────────────────────────────────────────────────────────────────────────────────────────────2 │
@@ -25,8 +26,7 @@
 │                                                                                                              │
 │                                                                                                              │
 │                                                                                                              │
-│                                                                                                              │
 │──────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 │ desk                                                                                             → task pane │
-│ enter open · ctrl+d done · ctrl+b unblock · ctrl+o inbox · + add · ? help                                    │
+│ enter open · ctrl+d done · ctrl+b unblock · ctrl+o inbox · + add · : commands · ? help                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

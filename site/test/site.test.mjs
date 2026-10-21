@@ -96,7 +96,7 @@ test("docs and demo describe the wide stage slider and threshold", async () => {
   assert.match(board, /four-stage slider/);
   assert.match(board, /\| Task \| Task details beside a narrow board rail \|/);
   assert.doesNotMatch(board, /bordered|cyan/);
-  assert.match(keys, /Wide stage slider/);
+  assert.match(keys, /## Wide slider/);
   assert.match(keys, /\| Full screen \| No change \| Task with rail \|/);
   assert.doesNotMatch(keys, /cyan/);
   assert.match(taskPage, /110 usable columns/);
@@ -108,7 +108,7 @@ test("docs and demo describe the wide stage slider and threshold", async () => {
   assert.match(demo, /state\.stageOrigin = state\.stage;/);
   assert.match(demo, /class="tsk-wide-split is-rail"/);
   assert.match(demo, /tsk-rule-column/);
-  assert.match(demo, /board ▸ task    → task · ← close · enter open/);
+  assert.match(demo, /crumb: "board ▸ task", keys: "→ task · ← close"/);
   assert.match(styles, /\.tsk-wide-split\.is-split \{\s*grid-template-columns: minmax\(0, 2fr\) 1px minmax\(0, 3fr\);/);
   assert.match(styles, /\.tsk-wide-split\.is-rail \{\s*grid-template-columns: 32ch 1px/);
 });
@@ -143,9 +143,9 @@ test("demo matches the quick-add, peek, and group-toggle contracts", async () =>
   const landing = await read("../src/styles/landing.css");
   assert.match(demo, /if \(e\.key === "Enter" && !e\.ctrlKey && !e\.altKey && !e\.metaKey\)/);
   assert.match(demo, /saveDraft\(e\.shiftKey\)/);
-  assert.match(demo, /id: "save", label: "enter save"/);
-  assert.match(demo, /id: "details", label: "tab notes"/);
-  assert.match(demo, /id: "close", label: "esc close"/);
+  assert.match(demo, /verb\("enter", "add", 0, "save"\)/);
+  assert.match(demo, /verb\("tab", "notes", 1, "details"\)/);
+  assert.match(demo, /verb\("esc", "close", 0, "close"\)/);
   // Closing the page by click must drop any open title/notes draft, or the next task
   // opens in edit mode carrying it; the verbs hide while an editor owns the footer.
   assert.match(
@@ -157,9 +157,9 @@ test("demo matches the quick-add, peek, and group-toggle contracts", async () =>
     /function pageVerbBar\(\)[\s\S]{0,240}?steps\.editor \|\| steps\.dirty \|\| state\.editField/,
   );
   assert.match(demo, /function runHint/);
-  assert.match(demo, /data-hint=/);
+  assert.match(demo, /closest\("\[data-hint\]"\)/);
   assert.match(demo, /"inbox"\}<\/span> · <span class="count">\$\{row\.count\}<\/span>/);
-  assert.match(demo, /\["views & find", "z \/ D", "done drawer"/);
+  assert.match(demo, /\["views & find", "z \/ D", "show \/ hide done drawer"/);
   assert.match(demo, /state\.helpQ/);
   assert.match(demo, /search keys or actions/);
   assert.match(demo, /tsk-help-divider/);
@@ -168,7 +168,10 @@ test("demo matches the quick-add, peek, and group-toggle contracts", async () =>
   assert.match(landing, /overflow-wrap: anywhere/);
   assert.match(demo, /e\.key === "z" \|\| e\.key === "D"/);
   assert.doesNotMatch(demo, /saveDraft\(e\.ctrlKey \|\| e\.metaKey\)/);
-  assert.doesNotMatch(demo, /thread #\$\{task\.thread\}|scope \$\{projectName\(task\)\}|created \$\{age\(/);
+  assert.doesNotMatch(demo, /thread #\$\{task\.thread\}|scope \$\{projectName\(task\)\}/);
+  // Dates belong on the task page, never in the compact peek attribution.
+  const peekMeta = demo.slice(demo.indexOf("function metaFor(task)"), demo.indexOf("function showCopyNotice"));
+  assert.doesNotMatch(peekMeta, /created|updated|age\(/);
   assert.match(demo, /function toggleAllGroups\(\)/);
   assert.match(demo, /id: "groups", label: "toggle groups"/);
   assert.match(demo, /if \(e\.key === "g" && !e\.altKey && !e\.ctrlKey && !e\.metaKey\)/);
@@ -187,12 +190,73 @@ test("the saved theme survives a visit to the docs", async () => {
 
 test("docs paint keys as keycaps and leave flags as code", async () => {
   const { isKeyName } = await import("../src/plugins/rehype-kbd.mjs");
-  for (const key of ["ctrl+s", "Shift+Enter", "Enter", "Esc", "→", "h", "j", "l", "P", "+", ":", "?"]) {
+  for (const key of [
+    "ctrl+s", "Shift+Enter", "Enter", "Esc", "→", "h", "j", "l", "P", "+", ":", "?",
+    "alt+Backspace", "Cmd+Backspace", "ctrl+Space", "ctrl+Delete", "shift+Tab", "alt+Esc",
+    "alt+↑", "ctrl+Home", "Home", "End", "Backspace", "Space",
+  ]) {
     assert.ok(isKeyName(key), `${key} is a key`);
   }
-  for (const code of ["--json", "-", "tsk add", "~/.tsk", "T30", "T", "i", "n", "global", "ctrl+"]) {
+  for (const code of ["--json", "-", "tsk add", "~/.tsk", "T30", "T", "i", "n", "global", "ctrl+", "ctrl+b unblock"]) {
     assert.ok(!isKeyName(code), `${code} is not a key`);
   }
+});
+
+test("demo paints a block on a done or gone task like one on you", async () => {
+  const demo = await read("../public/board-demo.js");
+  // Lift the glyph rule and the block helpers it reads out of the demo's closure.
+  const lift = (start) => {
+    const at = demo.indexOf(start);
+    assert.ok(at >= 0, `${start} is in the demo`);
+    let depth = 0;
+    for (let i = demo.indexOf("{", at); i < demo.length; i++) {
+      if (demo[i] === "{") depth++;
+      else if (demo[i] === "}" && --depth === 0) return demo.slice(at, i + 1);
+    }
+    throw new Error(`${start} never closes`);
+  };
+  const line = (pattern) => {
+    const match = demo.match(pattern);
+    assert.ok(match, `${pattern} is in the demo`);
+    return match[0];
+  };
+  const source = [
+    lift("const GLYPH = {"),
+    lift("const taskGlyph = (task) => {"),
+    lift("function blockOn(block) {"),
+    lift("function blockWait(task) {"),
+    line(/const isReview = [^\n]*;/),
+    line(/const liveTask = \(number\) =>\s*[^;]*;/),
+    "return taskGlyph;",
+  ].join(";\n");
+  const tasks = [
+    { number: 1, status: "done" },
+    { number: 2, status: "blocked", block: { kind: "blocked", on: "task:1" } },
+    { number: 3, status: "blocked", block: { kind: "blocked", on: "task:9" } },
+    { number: 4, status: "started" },
+    { number: 5, status: "blocked", block: { kind: "blocked", on: "task:4" } },
+    { number: 6, status: "blocked", block: { kind: "blocked", on: "agent:pi" } },
+    { number: 7, status: "blocked", block: { kind: "blocked", on: "you" } },
+  ];
+  const taskGlyph = new Function("state", source)({ tasks });
+  const glyphs = Object.fromEntries(tasks.map((task) => [task.number, taskGlyph(task)]));
+  assert.deepEqual(glyphs, { 1: "✓", 2: "■", 3: "■", 4: "●", 5: "□", 6: "□", 7: "■" });
+});
+
+test("every chord the docs name paints as a keycap", async () => {
+  const { isKeyName } = await import("../src/plugins/rehype-kbd.mjs");
+  const docsDir = new URL("../src/content/docs/docs/", import.meta.url);
+  const missed = [];
+  for (const name of await readdir(docsDir)) {
+    if (![".md", ".mdx"].includes(extname(name))) continue;
+    const text = await readFile(new URL(name, docsDir), "utf8");
+    for (const [, code] of text.matchAll(/`([^`\s]+)`/g)) {
+      if (/^(ctrl|shift|alt|cmd|meta)\+/i.test(code) && !isKeyName(code)) {
+        missed.push(`${name}: ${code}`);
+      }
+    }
+  }
+  assert.deepEqual(missed, []);
 });
 
 test("docs open on the two-party board and let agents set status", async () => {
@@ -201,7 +265,7 @@ test("docs open on the two-party board and let agents set status", async () => {
   assert.match(overview, /tsk status/);
   assert.doesNotMatch(overview, /Done is a human verb/);
   const cli = await read("../src/content/docs/docs/cli.md");
-  assert.match(cli, /## For agents/);
+  assert.match(cli, /\[tsk for agents\]\(\/docs\/agents\/\)/);
   assert.match(cli, /tsk status <task> done/);
 });
 
@@ -218,6 +282,11 @@ test("attribution is peek-only in demo and static anatomy", async () => {
   const styles = await read("../src/styles/landing.css");
   const guide = await read("../src/content/docs/docs/board.md");
   assert.doesNotMatch(demo, /<span class="meta">/);
+  assert.match(
+    demo,
+    /task\.assignee && showAssignee \? `@\$\{task\.assignee\}` : "",\s*task\.base \? `⎇ \$\{task\.base\}` : "",\s*rowLabelText \|\| "",/,
+    "peek metadata must be @assignee (unless the view already says it), the base, then the row's #thread · project label",
+  );
   assert.match(styles, /\.tsk-attribution\s*\{[^}]*white-space: pre-wrap;[^}]*overflow-wrap: anywhere;/);
   assert.match(styles, /\.tsk-row-main\s*\{[^}]*padding-right: 2ch;/);
   assert.doesNotMatch(page, /class="r meta"/);
@@ -274,10 +343,13 @@ test("hero board pins reveal callout copy", async () => {
   assert.match(page, /s-footrule[\s\S]*<span class="l meta">desk<\/span>/);
   assert.equal((page.match(/s-footrule/g) || []).length, 1);
   assert.doesNotMatch(page, /<span class="l meta">2 done<\/span>/);
-  // The fixture's verb bar minus ctrl+b, so it sits on one line beside the pin gutter.
-  const verbBar = await read("../../tests/fixtures/queue_board/board.txt");
-  assert.ok(verbBar.includes("enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · ctrl+b block · ? help"));
-  assert.match(page, /enter open · ctrl\+d done · ctrl\+n next · ctrl\+o inbox · \? help/);
+  // The selected row is a review on you (▲), so the bar is the TUI's bar for that row: the
+  // blocked row's seats in the golden fixtures, with `block` where a blocked row says
+  // `unblock` (board_verb_items / status_verbs in src/ui/board/draw.rs), fitted to 78
+  // columns, so it stays on one line beside the pin gutter.
+  const desk78 = await read("../../tests/fixtures/queue_board/desk_group_project_sort_thread_78x24.txt");
+  assert.ok(desk78.includes("enter open · ctrl+d done · ctrl+b unblock · : commands · ? help"));
+  assert.match(page, /<span class="l meta">enter open · ctrl\+d done · ctrl\+b block · : commands · \? help<\/span>/);
   const css = await read("../src/styles/landing.css");
   assert.match(css, /\.hero-side \.screen \{[^}]*white-space: pre-wrap/);
   assert.match(css, /\.hero-side \.s-row \.l \{[^}]*text-overflow: clip/);

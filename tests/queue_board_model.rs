@@ -16,8 +16,8 @@ use tsk_tui::store::TaskStore;
 use tsk_tui::ui::board::{apply_intent, draw_board, BoardModel, ProjectScopeOption};
 use tsk_tui::ui::input::BoardIntent;
 use tsk_tui::ui::queue::{
-    query_board, query_lens, BoardLens, ProjectRow, QueueView, SectionKind, ThreadFilter,
-    INBOX_HEADER_ROW_ID,
+    query_board, query_lens, BoardFilter, BoardLens, ProjectRow, QueueView, SectionKind,
+    ThreadFilter, INBOX_HEADER_ROW_ID,
 };
 use uuid::Uuid;
 
@@ -38,13 +38,17 @@ fn task(id: u128, title: &str, status: HumanStatus, scope: TaskScope, updated_se
         title: title.into(),
         notes: None,
         thread: None,
+        assignee: None,
+        assignee_kind: Default::default(),
+        base: None,
+        dispatch: None,
+        after: Vec::new(),
         status,
+        block: None,
+        past_blocks: Vec::new(),
         scope,
         provenance: ProvenanceOrigin::Manual,
-        history: vec![TaskEvent {
-            kind: TaskEventKind::Created,
-            at,
-        }],
+        history: vec![TaskEvent::new(TaskEventKind::Created, at)],
         steps: Vec::new(),
         soft_deleted: false,
         archived: false,
@@ -572,7 +576,7 @@ fn project_deck_lists_tasks_flat_with_thread_filter_across_statuses() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Project(Path::new(THIS_REPO)),
         true,
-        &ThreadFilter::All,
+        &BoardFilter::default(),
     );
     let deck = on_deck(&view);
     assert_eq!(
@@ -588,7 +592,7 @@ fn project_deck_lists_tasks_flat_with_thread_filter_across_statuses() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Project(Path::new(THIS_REPO)),
         true,
-        &ThreadFilter::Named("release".to_string()),
+        &BoardFilter::thread(ThreadFilter::Named("release".to_string())),
     );
     assert_eq!(
         section_ids(&filtered, SectionKind::InMotion),
@@ -629,7 +633,7 @@ fn project_deck_orders_ready_tasks_oldest_first_across_threads() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Project(Path::new(THIS_REPO)),
         false,
-        &ThreadFilter::All,
+        &BoardFilter::default(),
     );
     let deck = on_deck(&view);
     assert_eq!(
@@ -665,7 +669,7 @@ fn without_a_thread_filter_keeps_only_unthreaded_tasks() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Project(Path::new(THIS_REPO)),
         false,
-        &ThreadFilter::Without,
+        &BoardFilter::thread(ThreadFilter::Without),
     );
     assert_eq!(
         section_ids(&view, SectionKind::OnDeck),
@@ -701,7 +705,7 @@ fn same_thread_name_joins_only_in_the_global_view_not_the_local_filter() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Project(Path::new(THIS_REPO)),
         false,
-        &ThreadFilter::Named("release".to_string()),
+        &BoardFilter::thread(ThreadFilter::Named("release".to_string())),
     );
     assert_eq!(
         section_ids(&local, SectionKind::OnDeck),
@@ -715,7 +719,7 @@ fn same_thread_name_joins_only_in_the_global_view_not_the_local_filter() {
         None,
         BoardLens::ThreadView("release"),
         false,
-        &ThreadFilter::All,
+        &BoardFilter::default(),
     );
     assert_eq!(
         section_ids(&view, SectionKind::OnDeck),
@@ -775,7 +779,7 @@ fn thread_view_covers_needs_you_motion_deck_and_drawer() {
         None,
         BoardLens::ThreadView("release"),
         true,
-        &ThreadFilter::All,
+        &BoardFilter::default(),
     );
     assert_eq!(
         section_ids(&view, SectionKind::NeedsYou),
@@ -838,7 +842,7 @@ fn projects_index_rows_carry_open_work_counts() {
         Some(Path::new(THIS_REPO)),
         BoardLens::Projects,
         false,
-        &ThreadFilter::All,
+        &BoardFilter::default(),
     );
     assert_eq!(view.sections, Vec::new(), "the index never lists tasks");
     assert_eq!(view.projects.len(), 1);
@@ -859,16 +863,14 @@ fn projects_index_rows_carry_open_work_counts() {
 #[test]
 fn selection_stays_on_task_id_across_motion_reorder() {
     let mut alpha_task = task(1, "alpha", HumanStatus::Started, project(THIS_REPO), 10);
-    alpha_task.history.push(TaskEvent {
-        kind: TaskEventKind::StatusSet,
-        at: epoch_plus(100),
-    });
+    alpha_task
+        .history
+        .push(TaskEvent::new(TaskEventKind::StatusSet, epoch_plus(100)));
     let alpha = alpha_task.id;
     let mut beta_task = task(2, "beta", HumanStatus::Started, project(THIS_REPO), 20);
-    beta_task.history.push(TaskEvent {
-        kind: TaskEventKind::StatusSet,
-        at: epoch_plus(200),
-    });
+    beta_task
+        .history
+        .push(TaskEvent::new(TaskEventKind::StatusSet, epoch_plus(200)));
     let beta = beta_task.id;
     let mut domain = domain_with_tasks(vec![alpha_task.clone(), beta_task.clone()]);
     let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
@@ -894,10 +896,9 @@ fn selection_stays_on_task_id_across_motion_reorder() {
 
     // A fresh status change on alpha moves it above beta; selection stays pinned
     // to beta's id, not to beta's row position.
-    alpha_task.history.push(TaskEvent {
-        kind: TaskEventKind::StatusSet,
-        at: epoch_plus(300),
-    });
+    alpha_task
+        .history
+        .push(TaskEvent::new(TaskEventKind::StatusSet, epoch_plus(300)));
     alpha_task.updated_at = epoch_plus(300);
     let reordered = domain_with_tasks(vec![alpha_task, beta_task]);
     model.sync_from_domain(&reordered);
@@ -1078,5 +1079,259 @@ fn two_fresh_models_from_same_store_share_no_ui_state_and_no_ui_writes_under_sta
     assert_eq!(
         before_config, after_config,
         "BoardModel must not write UI-state files under the config dir"
+    );
+}
+
+/// Projects whose names, full paths, and ages each give a different order: the current
+/// repository (`app`), then `alpha`, `Beta`, and `zeta` under three parent folders. `zeta`
+/// has the oldest first task and the newest second one: a project's age is its first task.
+fn sorted_projects_domain() -> DomainState {
+    let mut tasks = vec![
+        task(1, "app task", HumanStatus::Open, project(THIS_REPO), 250),
+        task(
+            2,
+            "zeta task",
+            HumanStatus::Open,
+            project("/work/zeta"),
+            100,
+        ),
+        task(
+            3,
+            "alpha task",
+            HumanStatus::Open,
+            project("/home/me/alpha"),
+            300,
+        ),
+        task(4, "beta task", HumanStatus::Open, project("/a/Beta"), 350),
+        task(
+            5,
+            "zeta later",
+            HumanStatus::Open,
+            project("/work/zeta"),
+            400,
+        ),
+    ];
+    for (index, task) in tasks.iter_mut().enumerate() {
+        task.number = Some(index as u64 + 1);
+    }
+    domain_with_tasks(tasks)
+}
+
+fn picker_projects(model: &BoardModel) -> Vec<String> {
+    model
+        .project_options()
+        .iter()
+        .map(|option| match option {
+            ProjectScopeOption::Home => "desk".to_string(),
+            ProjectScopeOption::Project(path) => {
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            }
+        })
+        .collect()
+}
+
+fn index_projects(model: &BoardModel) -> Vec<String> {
+    model
+        .project_rows()
+        .iter()
+        .map(|row| tsk_tui::ui::queue::short_project_name(&row.path).to_string())
+        .collect()
+}
+
+#[test]
+fn project_picker_sorts_by_name_and_s_cycles_the_order_keeping_the_highlight() {
+    use tsk_tui::ui::queue::ProjectSort;
+    let mut domain = sorted_projects_domain();
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::OpenProjectSelector,
+        None,
+    )
+    .unwrap();
+    // Desk first, the current repository second, then by name across parent folders.
+    assert_eq!(
+        picker_projects(&model),
+        ["desk", "app", "alpha", "Beta", "zeta"]
+    );
+    let beta = model
+        .project_options()
+        .iter()
+        .position(|option| option == &ProjectScopeOption::Project(PathBuf::from("/a/Beta")))
+        .unwrap();
+    while model.project_picker_index() != Some(beta) {
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::ProjectPickerNext,
+            None,
+        )
+        .unwrap();
+    }
+    let expected = [
+        (
+            ProjectSort::NameDesc,
+            ["desk", "app", "zeta", "Beta", "alpha"],
+            "name Z–A",
+        ),
+        (
+            ProjectSort::Newest,
+            ["desk", "app", "Beta", "alpha", "zeta"],
+            "newest first",
+        ),
+        (
+            ProjectSort::Oldest,
+            ["desk", "app", "zeta", "alpha", "Beta"],
+            "oldest first",
+        ),
+        (
+            ProjectSort::NameAsc,
+            ["desk", "app", "alpha", "Beta", "zeta"],
+            "name A–Z",
+        ),
+    ];
+    for (sort, order, label) in expected {
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::ProjectPickerCycleSort,
+            None,
+        )
+        .unwrap();
+        assert_eq!(model.project_sort(), sort);
+        assert_eq!(picker_projects(&model), order, "{label}");
+        let highlighted = model.project_picker_index().unwrap();
+        assert_eq!(
+            model.project_options()[highlighted],
+            ProjectScopeOption::Project(PathBuf::from("/a/Beta")),
+            "{label}: the highlight stays on Beta"
+        );
+        let frame = board_rows(&model, 100, 30).join("\n");
+        assert!(
+            frame.contains(&format!("s sort: {label}")),
+            "{label} in the footer:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn archived_tab_takes_the_project_order() {
+    let mut domain = sorted_projects_domain();
+    for path in ["/work/zeta", "/home/me/alpha", "/a/Beta"] {
+        domain.archive_project(path).unwrap();
+    }
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    let names = |model: &BoardModel| -> Vec<String> {
+        model
+            .archived_project_options()
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    };
+    assert_eq!(names(&model), ["alpha", "Beta", "zeta"]);
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::OpenProjectSelector,
+        None,
+    )
+    .unwrap();
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::ProjectPickerSwitchTab,
+        None,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::ProjectPickerCycleSort,
+            None,
+        )
+        .unwrap();
+    }
+    assert_eq!(names(&model), ["zeta", "alpha", "Beta"], "oldest first");
+}
+
+#[test]
+fn projects_view_s_opens_the_project_sort_picker_and_keeps_the_cursor() {
+    use tsk_tui::ui::board::BoardInputMode;
+    use tsk_tui::ui::queue::{NavTab, ProjectSort};
+    let mut domain = sorted_projects_domain();
+    let mut model = BoardModel::from_domain(&domain, Some(PathBuf::from(THIS_REPO)));
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::SelectNavTab(NavTab::Projects),
+        None,
+    )
+    .unwrap();
+    // Here stays first; the rest go by name, not by full path.
+    assert_eq!(index_projects(&model), ["app", "alpha", "Beta", "zeta"]);
+    let frame = board_rows(&model, 100, 30).join("\n");
+    assert!(frame.contains("sort: name \u{25be}"), "header:\n{frame}");
+    while model.selected_project_row().map(|row| row.path) != Some("/work/zeta".to_string()) {
+        apply_intent(&mut domain, &mut model, BoardIntent::SelectNext, None).unwrap();
+    }
+
+    // Esc changes nothing.
+    apply_intent(&mut domain, &mut model, BoardIntent::OpenSortPicker, None).unwrap();
+    assert_eq!(model.input_mode(), BoardInputMode::ListPicker);
+    apply_intent(&mut domain, &mut model, BoardIntent::ListPickerNext, None).unwrap();
+    apply_intent(&mut domain, &mut model, BoardIntent::CancelListPicker, None).unwrap();
+    assert_eq!(model.project_sort(), ProjectSort::NameAsc);
+
+    // Type to filter, Enter applies.
+    apply_intent(&mut domain, &mut model, BoardIntent::OpenSortPicker, None).unwrap();
+    for character in "newest".chars() {
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::ListPickerQueryInsert(character),
+            None,
+        )
+        .unwrap();
+    }
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::ConfirmListPicker,
+        None,
+    )
+    .unwrap();
+    assert_eq!(model.project_sort(), ProjectSort::Newest);
+    assert_eq!(index_projects(&model), ["app", "Beta", "alpha", "zeta"]);
+    assert_eq!(
+        model.selected_project_row().map(|row| row.path),
+        Some("/work/zeta".to_string()),
+        "the cursor stays on zeta"
+    );
+    let frame = board_rows(&model, 100, 30).join("\n");
+    assert!(frame.contains("sort: newest \u{25be}"), "header:\n{frame}");
+
+    apply_intent(&mut domain, &mut model, BoardIntent::OpenSortPicker, None).unwrap();
+    for character in "oldest".chars() {
+        apply_intent(
+            &mut domain,
+            &mut model,
+            BoardIntent::ListPickerQueryInsert(character),
+            None,
+        )
+        .unwrap();
+    }
+    apply_intent(
+        &mut domain,
+        &mut model,
+        BoardIntent::ConfirmListPicker,
+        None,
+    )
+    .unwrap();
+    assert_eq!(index_projects(&model), ["app", "zeta", "alpha", "Beta"]);
+    assert_eq!(
+        model.selected_project_row().map(|row| row.path),
+        Some("/work/zeta".to_string())
     );
 }

@@ -5,17 +5,17 @@
 │ NEEDS YOU ───────────────────────────────────────────────────────────────────2 │
 │                                                                                │
 │  ■ T5 Wire dispatch cleanup receipts  herdr                                    │
-│  ▲ T6 Do┌─ help ▼ ────────────────────────────────────────────── [x]─┐         │
-│         │                                                            │         │
-│ IN MOTIO│  / search keys or actions…                                 │───────2 │
-│         │ ────────────────────────────────────────────────────────── │         │
-│▸ ● T1 Sm│  NAVIGATION                                                │         │
-│  ● T2 Ed│  ↑↓ / jk            move                                   │         │
-│         │  shift+M            multi-select                           │         │
-│ ON DECK │  shift+↑↓           mark and move (multi-select)           │───────1 │
-│         │                                                            │         │
-│  ○ T7 Gl├────────────────────────────────────────────────────────────┤         │
-│         │ type search · ↑↓ scroll · esc clear/close                  │         │
+│    └─ @c┌─ help ▼ ────────────────────────────────────────────── [x]─┐         │
+│  ▲ T6 Do│                                                            │         │
+│         │  / search keys or actions…                                 │         │
+│ IN MOTIO│ ────────────────────────────────────────────────────────── │───────2 │
+│         │  NAVIGATION                                                │         │
+│▸ ● T1 Sm│  ↑↓ / jk            move up / down                         │         │
+│  ● T2 Ed│  shift+M            start / stop multi-select              │         │
+│         │  shift+↑↓           mark and move (multi-select)           │         │
+│ ON DECK │                                                            │───────1 │
+│         ├────────────────────────────────────────────────────────────┤         │
+│  ○ T7 Gl│ type search · ↑↓ scroll · esc clear / close                │         │
 │         └────────────────────────────────────────────────────────────┘         │
 │                                                                                │
 │                                                                                │

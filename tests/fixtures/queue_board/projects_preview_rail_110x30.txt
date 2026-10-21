@@ -2,7 +2,7 @@
 │                                │                                                                             │
 │ desk  ·  tsk ▾  ·  projects    │  tsk                                 group: none ▾   sort: recent ▾   all ▾ │
 │                                │                                                                             │
-│                     Overview ▾ │  IN MOTION ───────────────────────────────────────────────────────────────1 │
+│      sort: name ▾   Overview ▾ │  IN MOTION ───────────────────────────────────────────────────────────────1 │
 │                                │                                                                             │
 │   PROJECT NEED MOTION DECK   … │ ▸ ● T1 Smoke-test worktree dispatch                                         │
 │                                │                                                                             │
@@ -28,5 +28,5 @@
 │                                │                                                                             │
 │──────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 │ tsk                                                                               index ◂ project    ← index │
-│ enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · ctrl+b block · ? help                                │
+│ enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · ctrl+b block · : commands · ? help                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

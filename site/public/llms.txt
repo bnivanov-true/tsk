@@ -2,51 +2,57 @@
 
 > tsk is a terminal task board for you and your agents: one shared queue, a TUI for you, a CLI for them.
 
-On macOS/Linux, install with `curl -fsSL https://gettsk.sh/install.sh | sh` or `brew install smarzban/tap/tsk`. On Windows 10/11 ARM64 or x86-64, run `irm https://www.gettsk.sh/install.ps1 | iex` in a PowerShell window (Windows PowerShell 5.1 or PowerShell 7); it selects the native architecture. Download the script first to use `-NoPathUpdate`, which leaves user PATH unchanged. Windows package-manager submissions and signing are not included yet.
-If Herdr is on PATH, the installer asks to run `tsk setup herdr` on an interactive terminal; when agent skill roots are detected it also asks once to install the tsk skill. The install ends with a single `Done.` line pointing at the board (plus the Herdr board shortcut after an accepted Herdr setup) and one row per skipped ask (`tsk setup herdr`, `tsk setup`); a custom `TSK_INSTALL_DIR` skips the asks and says so. Homebrew prints the Herdr setup command as a caveat.
-Herdr's board shortcut opens or focuses one board per workspace across its tabs, preserving its view and edits. Other workspaces stay untouched; boards share the same task store.
-Details: https://gettsk.sh/docs/install.md
-Inside Git, the repo root is the default project. Outside Git, tsk opens and captures on the desk while keeping the current directory available as a project. In `!p name`, `tsk add -p name`, and JSON plans, a bare project name must uniquely match a known project; a new project destination requires an existing absolute directory (`/…` or `~/…` on macOS/Linux, `C:\…` or `~\…` on Windows).
-New tasks start with status `open` in the board's inbox, below picked `ready` tasks. Use the ready and open board commands to move them between groups, and `tsk list --open` or `--ready` to filter. The board checks GitHub releases at most daily and shows a dim `vX.Y.Z available, run tsk update` on the status row; set `TSK_NO_UPDATE_CHECK` to disable. Run `tsk update` to run the official installer for an installer-managed copy; on Windows a detached helper waits for the running executable to exit before replacing it. Existing Herdr registration and outdated installed agent skills are refreshed; when no agent skill is installed, an interactive update can offer the first-install skill setup. Homebrew copies print `brew update && brew upgrade tsk` instead.
-Store format v5 adds one-step batch undo for marked completions and deletions. A v4 store migrates on first save and keeps a `tsk.json.v4` backup; earlier migrations still run in order.
-`N` tasks on the desk are human-only notices: four starter tasks on a first open, one `What's new in tsk` task after an upgrade. `tsk list` never shows them.
-Press Shift+M to enter multi-select, then mark tasks with Space, shifted arrow keys, or a plain click and use the board's status, archive, or delete shortcut on the whole set. Shift+M again while the board owns input, an action, Escape, or a lens change exits the mode and clears its session-only marks; removing the last mark alone keeps the mode active, and text entry keeps Shift+M as a capital M. Enter and edit remain cursor-only. Right arrow or l opens task details and left arrow or h closes them in non-text board and task views; text entry keeps h and l as characters. At 110 usable columns or wider, clicking a task opens or updates its details beside the board with board focus. Double-click opens it full screen. Narrow panes use click-to-peek.
-On Projects Overview, clicking or moving the index selection opens the cursored project's preview beside the index at Split, then a live narrow project board at Rail, never a full-screen task. The right board names the selected project in its top row and owns its own selection and actions. Expanding quick-add there keeps the draft title in that header while Notes is active; Esc returns to the index.
+The human works the board in a TUI; agents read and write the same tasks with the `tsk` CLI. It ships as the `herdr-tsk` plugin for Herdr and also runs standalone in any terminal.
 
-Press `/` on any board tab to filter the rows it shows. Projects Overview matches project names and paths; task boards match every whitespace-separated query term against title, notes, steps, thread, and `T` number. `Enter` pins the query and returns input to board keys, while `Esc` clears the input or a pinned query first. The done drawer is searched only while open, and changing tab, project, or Projects view clears search. In the wide Projects preview, `/` searches the right board when it has focus.
+## Install
 
-Every board row carries a dim `#thread · project` label (`desk` for desk tasks) two spaces after its title at any width, wrapping to the title's indent when it does not fit, and omitting whatever the view already says; a peek closes on the same label. Bare `g` groups the live sections, the inbox included, by project or thread (`none · project · thread` on the desk, `none · thread` on a project board), bare `s` sorts rows by recent, project, thread, or title, bare `f` folds the cursor's group, and `Shift+F` folds or unfolds every group. Every sub-header is a cursor stop: `←`/`h` folds it and `→`/`l` unfolds it (falling through to the peek or wide slider when there is nothing to do), the inbox and archived headings included, a click on any header only selects it, and `Enter` or a double-click opens the sub-header's project board, the desk, or its thread's cross-project view; a double-click on a header that opens nothing (`no thread`, `desk` on the desk, the inbox, archived) folds or unfolds it instead. On the desk, `t` opens a filter with threads and projects tabs whose choices combine. Every task list's header shows clickable `group: …` and `sort: …` controls beside its filter, shortened to `g:… s:…` when narrow. Group, sort, fold, and filter are per board session. `tsk list` arranges the same way with `--group project|thread` and `--sort recent|project|thread|title` (live tasks; `project` needs `--all`), filters unthreaded tasks with `--no-thread`, and refuses a repeated single-value flag (exit 2).
+- macOS and Linux: `curl -fsSL https://gettsk.sh/install.sh | sh`, or `brew install smarzban/tap/tsk`.
+- Windows 10/11, ARM64 or x86-64: `irm https://www.gettsk.sh/install.ps1 | iex` in PowerShell.
+- `tsk setup herdr` adds the board to Herdr, `tsk setup` installs the agent skill, and `tsk update` upgrades. Details: https://gettsk.sh/docs/install.md
 
-Every text field (Title, Notes, steps, Thread, and the quick-add line and draft) moves and deletes by word with the usual macOS keys: Option or Alt with the left and right arrows (or the Control arrows) jumps a word, Option+Backspace or Control+W deletes the word before the cursor, and Option+Delete or Alt+D the word after it. Control+U (what Mac terminals send for Command+Backspace) deletes back to the line start and Control+K to the line end; in Notes they join a line to its neighbour when the cursor is already at its edge. Outside text fields Control+U stays undo. In Notes a word delete stops at a line break. Search, the palette, Help, and pickers drop their last word the same way. Option reaches tsk only when the terminal sends Option as Meta (Terminal.app "Use Option as Meta key", iTerm2 Option key "Esc+"). Enter in Notes starts a new line, as its footer says, and Shift+Enter saves; Tab on the quick-add line opens notes and details. See the Keys guide for the exact chords.
+## Concepts
 
-The quit shortcut exits from non-editor board surfaces, including task pages, Help, pickers, and the wide project preview. Text entry keeps its editing behavior; save recovery must be resolved first. Unsaved drafts block quitting, including drafts parked outside the focused project preview. Quit attempts preserve the pending save's failure message. Escape dismisses editors and overlays first, then collapses either wide split to its full-width board or projects index. Task drafts stay parked; unsaved work in a project preview prevents closing it. Escape then quits without confirmation at the full-board root on any tab, never switching tabs first. A narrow resize that hides the right column also exposes that root; parked drafts still block quitting. The browser demo releases keyboard focus at root instead of exiting. See the Keys guide for shortcuts.
+- Status: `open` (inbox), `ready` (picked), `started`, `blocked`, `review`, `done`. The human owns status; checking every step never completes a task.
+- Desk and project: a project is a Git repository root, named by its folder. The desk holds tasks with no project.
+- Thread: a label that groups related work, within a project or across several.
+- Task number: `T12`, `12`, and the task's UUID address the same task.
+- Notice: `N` rows on the desk (starter tasks, What's new) are for the human only. `tsk list` never shows them.
+- Agent profile: an `[agent.<name>]` table in `config.toml` holding the command that launches an agent.
+- Assignee: an agent profile, the human (`you`), or a named person. Only an agent assignee dispatches.
+- Dispatch: in Herdr, starting a project task assigned to an agent launches it in a new Git worktree and Herdr workspace, from the task's base branch.
+- Block: a task waiting on an answer, with why, what it needs, and options to choose from. Replies answer it; unblocking sends them to the running dispatched agent. `tsk edit T12 --on <who>` changes who an open block or review waits on.
+- Review: work handed back with what was done and checks to verify. The human marks the checks, then approves or sends it back with feedback.
+- After: a task waits until the tasks it runs after are done. The last done starts it if it is ready.
+- Paper trail: who changed what on a task, newest first.
 
 ## For agents
 
-- `tsk guide` prints the workflow; `tsk setup` detects agents and can install the skill; `tsk setup <agent>` targets one agent
-- The skill covers rules of engagement, board language, the exit contract, and workflows, and points at `tsk help <command>` for syntax; its `Refine a task` section shapes a rough task into a brief on the board (propose, then write)
-- `tsk list T<n>` returns the complete task, including notes, steps, and thread, in human-readable or JSON form
-- `tsk steps T<n> move <short-id> --before|--after <short-id>` (or `--first`/`--last`) reorders a step, keeping its short ID and checked state; `tsk steps T<n> add "…"` takes the same place flags. On the task page, a keyboard shortcut moves the selected step and adding a step with one selected puts it directly below
-- `tsk list` orders rows within each status like the board: `ready` oldest pick first, `open` oldest capture first, everything else most recent status change first. `--json` is that flat board order; with `--all`, human output groups each status by scope, ordering the groups by their first row and keeping the board order inside each group. With `--group`, human output sub-groups each status hottest first and `--json` rows gain a `group` label
+- Run `tsk guide` first: it prints the workflow and the rules. `tsk help <command>` is the syntax reference.
+- Read with `tsk list --json`. `tsk list T12 --json` returns one task in full: notes, steps, block, review, dispatch, and `activity`.
+- Write with `tsk add`, `tsk edit`, and `tsk steps`. Read the exit code before any retry; `tsk reply`, `tsk dispatch`, `tsk edit --append-notes`, and some `tsk steps` commands are not idempotent.
+- When your work is finished, hand it back: `tsk status T12 review --done "…" --check "…"`. Set `done` only when the user says so.
+- When you need the human: `tsk status T12 blocked --why "…" --option "…"`, then stop. `tsk reply T12 "…"` answers a block or adds review feedback.
+- `tsk dispatch T12` launches an assigned project task's agent in Herdr. `tsk dispatch T12 --show-prompt` prints the prompt it would send. `tsk clean T12` removes its worktree and merged branch; never clean the worktree you run in.
+- Inside a dispatched agent, `TSK_AGENT` names the profile as the author of each change.
 - Guide: https://gettsk.sh/docs/agents.md
-- CLI: https://gettsk.sh/docs/cli.md
-- `tsk help [<command>]` prints the CLI or one command's syntax reference.
-- `tsk --version` (or `tsk -V`) prints the installed version.
-
-Storage, backups, and release-check settings: https://gettsk.sh/docs/storage.md
-- Full docs: https://gettsk.sh/llms-full.txt
+- Coordinating other agents (briefs, review gate, live tests): https://gettsk.sh/docs/coordinator.md
 
 ## Docs
 
 - Overview: https://gettsk.sh/docs/index.md
 - Install: https://gettsk.sh/docs/install.md
 - Board: https://gettsk.sh/docs/board.md
+- Dispatch: https://gettsk.sh/docs/dispatch.md
 - Keys: https://gettsk.sh/docs/keys.md
 - Capture: https://gettsk.sh/docs/capture.md
 - Task page: https://gettsk.sh/docs/task-page.md
 - Steps: https://gettsk.sh/docs/steps.md
+- tsk for agents: https://gettsk.sh/docs/agents.md
+- Coordinator skill: https://gettsk.sh/docs/coordinator.md
 - CLI: https://gettsk.sh/docs/cli.md
+- Storage: https://gettsk.sh/docs/storage.md
 
-## Source
+## Optional
 
-https://github.com/smarzban/tsk
+- Every docs page in one file: https://gettsk.sh/llms-full.txt
+- Source: https://github.com/smarzban/tsk

@@ -5,6 +5,7 @@
 │ NEEDS YOU ───────────────────────────────────────────────────────────────────2 │
 │                                                                                │
 │  ■ T5 Wire dispatch cleanup receipts  herdr                                    │
+│    └─ @claude: Which receipt format? · 41m                                     │
 │  ▲ T6 Docs refresh pass after F9 ships  herdr                                  │
 │                                                                                │
 │ IN MOTION ───────────────────────────────────────────────────────────────────2 │
@@ -19,8 +20,7 @@
 │  ○ T7 Global backlog note                                                      │
 │                                                                                │
 │                                                                                │
-│                                                                                │
 │────────────────────────────────────────────────────────────────────────────────│
-│ multi-select · 2 selected · esc clears                                         │
-│ enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · ctrl+b block · ? help  │
+│ multi-select · 2 selected · esc clear                                          │
+│ enter open · ctrl+d done · ctrl+n next · ctrl+o inbox · : commands · ? help    │
 └────────────────────────────────────────────────────────────────────────────────┘
