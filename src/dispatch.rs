@@ -595,6 +595,14 @@ pub trait DispatchHost {
             warning: None,
         })
     }
+    /// [`Self::resolve_base_choice`] from refs already fetched, for a preview: no network.
+    fn resolve_base_cached(
+        &mut self,
+        project: &Path,
+        explicit: Option<&str>,
+    ) -> Result<crate::git_base::ResolvedBase, String> {
+        self.resolve_base_choice(project, explicit)
+    }
     /// Whether a first dispatch must not take `branch`: a local or remote-tracking branch of that
     /// name, or a registered worktree in the directory Herdr would derive from it, exists.
     fn branch_taken(&mut self, _project: &Path, _branch: &str) -> Result<bool, String> {
@@ -1165,6 +1173,14 @@ impl DispatchHost for SystemDispatchHost {
         explicit: Option<&str>,
     ) -> Result<crate::git_base::ResolvedBase, String> {
         crate::git_base::resolve(project, explicit)
+    }
+
+    fn resolve_base_cached(
+        &mut self,
+        project: &Path,
+        explicit: Option<&str>,
+    ) -> Result<crate::git_base::ResolvedBase, String> {
+        crate::git_base::resolve_cached(project, explicit)
     }
 
     fn create_worktree(
@@ -3501,6 +3517,8 @@ pub struct EligibleDispatch {
     task: Task,
     profile: crate::agents::AgentProfile,
     project: PathBuf,
+    /// The `[project."<path>"]` settings for `project`, if `config.toml` has them.
+    settings: Option<crate::agents::ProjectSettings>,
     again: bool,
 }
 
@@ -3743,6 +3761,7 @@ fn check_inner(
             return Err(DispatchError::AlreadyDispatched(existing.worktree.clone()));
         }
     }
+    let settings = profiles.project(&project).cloned();
     Ok(EligibleDispatch {
         id,
         number,
@@ -3750,7 +3769,125 @@ fn check_inner(
         task,
         profile,
         project,
+        settings,
         again,
+    })
+}
+
+/// What `tsk dispatch --show-prompt` prints: the launch a dispatch would run now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptPreview {
+    pub number: u64,
+    pub assignee: String,
+    /// The rendered command, with the prompt as its last argument.
+    pub argv: Vec<String>,
+    /// The names of the profile's `env` variables; their values are never shown.
+    pub env_names: Vec<String>,
+    /// The task has no dispatch record, so its worktree and branch are predicted.
+    pub predicted: bool,
+    /// A desk task: nothing dispatches it, and its worktree, branch, and base stay unfilled.
+    pub desk: bool,
+}
+
+/// Render the launch the task's assignee would get, without launching or writing anything.
+/// Any status works, and Herdr is not needed. A dispatched task renders from its record; any
+/// other project task from the branch and base a first dispatch would take, resolved the same
+/// way from refs already fetched. A desk task keeps the placeholders it cannot fill.
+pub fn preview_prompt(
+    state: &DomainState,
+    id: Uuid,
+    profiles: &AgentProfiles,
+    base_override: Option<&str>,
+    host: &mut impl DispatchHost,
+) -> Result<PromptPreview, DispatchError> {
+    let task = state.get(id).ok_or(DispatchError::UnknownTask)?;
+    let number = task.number.ok_or(DispatchError::UnknownTask)?;
+    let assignee = task
+        .agent_assignee()
+        .map(str::to_string)
+        .ok_or(DispatchError::NoAssignee)?;
+    let profile = profiles
+        .get(&assignee)
+        .ok_or_else(|| DispatchError::UnknownAgent(assignee.clone()))?;
+    let project = match &task.scope {
+        TaskScope::Project { path } => Some(PathBuf::from(path)),
+        TaskScope::Global => None,
+    };
+    let settings = project
+        .as_deref()
+        .and_then(|project| profiles.project(project));
+    let (worktree, branch, base) = match &task.dispatch {
+        Some(record) => (
+            record.worktree.clone(),
+            record.branch.clone(),
+            record
+                .base
+                .as_deref()
+                .map(|base| {
+                    crate::git_base::short_name_for_remote(base, record.base_remote.as_deref())
+                })
+                .unwrap_or_default(),
+        ),
+        None => match &project {
+            Some(project) => {
+                // The same choices `launch_with_host` makes for a first dispatch.
+                let explicit = base_override.or(task.base.as_deref());
+                let choice = host
+                    .resolve_base_cached(project, explicit)
+                    .map_err(|reason| {
+                        if explicit.is_some() {
+                            DispatchError::UnknownBase(reason)
+                        } else {
+                            DispatchError::NoDefaultBase(reason)
+                        }
+                    })?;
+                let base = crate::git_base::short_name_for_remote(
+                    &choice.reference,
+                    choice.remote.as_deref(),
+                );
+                let names = DispatchNames::new(number, &task.title);
+                let branch = free_branch(host, project, &names, number)?;
+                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                    .filter(|home| !home.is_empty())
+                    .map(PathBuf::from);
+                let worktree = home
+                    .zip(project.file_name())
+                    .map(|(home, repo)| {
+                        home.join(".herdr/worktrees")
+                            .join(repo)
+                            .join(herdr_worktree_directory(&branch))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|| "{worktree}".into());
+                (worktree, branch, base)
+            }
+            None => ("{worktree}".into(), "{branch}".into(), "{base}".into()),
+        },
+    };
+    let steps = rendered_steps(task);
+    let rendered = profile.render(
+        &RenderContext {
+            number,
+            title: &task.title,
+            notes: task.notes.as_deref().unwrap_or_default(),
+            steps: &steps,
+            worktree: &worktree,
+            branch: &branch,
+            base: &base,
+        },
+        settings,
+    );
+    let mut env_names = rendered.env.keys().cloned().collect::<Vec<_>>();
+    env_names.push(crate::domain::AGENT_ENV.to_string());
+    env_names.sort();
+    Ok(PromptPreview {
+        number,
+        assignee,
+        argv: rendered.argv,
+        env_names,
+        predicted: task.dispatch.is_none() && project.is_some(),
+        desk: project.is_none(),
     })
 }
 
@@ -3767,6 +3904,7 @@ pub fn launch_with_host(
         task,
         profile,
         project,
+        settings,
         ..
     } = eligible;
     let number = *number;
@@ -3913,15 +4051,18 @@ pub fn launch_with_host(
         .as_deref()
         .map(|base| crate::git_base::short_name_for_remote(base, base_remote.as_deref()))
         .unwrap_or_default();
-    let rendered = profile.render(&RenderContext {
-        number,
-        title: &task.title,
-        notes: task.notes.as_deref().unwrap_or_default(),
-        steps: &steps,
-        worktree: &worktree,
-        branch: &branch,
-        base: &short_base,
-    });
+    let rendered = profile.render(
+        &RenderContext {
+            number,
+            title: &task.title,
+            notes: task.notes.as_deref().unwrap_or_default(),
+            steps: &steps,
+            worktree: &worktree,
+            branch: &branch,
+            base: &short_base,
+        },
+        settings.as_ref(),
+    );
     let launch = run_launch(
         host,
         platform,
@@ -5514,6 +5655,149 @@ mod tests {
 
     /// The pane types one fixed line; task text and `env` values reach the agent only through
     /// the launcher file, and never the stored record (tsk.json, `tsk list --json`, backups).
+    fn layered_profiles() -> AgentProfiles {
+        let path = std::env::temp_dir().join(format!(
+            "tsk-dispatch-layered-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("mkdir");
+        fs::write(
+            path.join("config.toml"),
+            "[project.\"/repos/app/\"]\nreview_on = \"coordinator\"\n\
+             prompt_append = \"Project rule for T{number}.\"\n\
+             [agent.implementer]\ncommand = [\"runner\"]\nprompt_append = \"Profile rule.\"\n",
+        )
+        .expect("config");
+        let profiles = AgentProfiles::load(&path).expect("profiles");
+        fs::remove_dir_all(path).expect("cleanup");
+        profiles
+    }
+
+    #[test]
+    fn a_dispatch_sends_the_projects_review_on_and_both_prompt_appends() {
+        let profiles = layered_profiles();
+        let (mut state, id) = task();
+        let mut host = FakeHost {
+            git: true,
+            ..FakeHost::default()
+        };
+        let result =
+            run_with_host(&mut state, id, &profiles, false, true, &mut host).expect("dispatch");
+        let prompt = result.record.argv.last().expect("prompt");
+        assert!(
+            prompt.contains(&format!(
+                "`tsk status {} review --on coordinator --done",
+                result.number
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.ends_with(&format!(
+                "the person who reviews it does.\n\nProject rule for T{}.\n\nProfile rule.",
+                result.number
+            )),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_preview_renders_like_a_dispatch_and_changes_nothing() {
+        let profiles = layered_profiles();
+        let (mut state, id) = task();
+        state.set_base(id, Some("release".into())).expect("base");
+        let before = serde_json::to_string(&state).expect("state");
+        // A leftover branch of the first name moves the preview on, as a dispatch would.
+        let mut host = FakeHost {
+            git: true,
+            taken: vec!["tsk/t1-ship-dispatch".into()],
+            ..FakeHost::default()
+        };
+        let preview = preview_prompt(&state, id, &profiles, None, &mut host).expect("preview");
+        assert_eq!(serde_json::to_string(&state).expect("state"), before);
+        assert!(preview.predicted && !preview.desk);
+        assert_eq!(preview.env_names, [crate::domain::AGENT_ENV]);
+        let prompt = preview.argv.last().expect("prompt");
+        assert!(
+            prompt.contains(
+                "/tsk-t1-ship-dispatch-2 on branch tsk/t1-ship-dispatch-2, based on release."
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.contains("review --on coordinator"), "{prompt}");
+        assert!(
+            prompt.ends_with("Project rule for T1.\n\nProfile rule."),
+            "{prompt}"
+        );
+
+        // A desk task has no project settings: the default, the profile's own text, and you.
+        let desk = state
+            .create_assigned(
+                "Desk work",
+                None,
+                TaskScope::Global,
+                ProvenanceOrigin::Manual,
+                None,
+                Some("implementer".into()),
+            )
+            .expect("desk task");
+        state.assign_numbers_for_persistence();
+        let preview =
+            preview_prompt(&state, desk, &profiles, Some("main"), &mut host).expect("preview");
+        assert!(preview.desk && !preview.predicted);
+        let prompt = preview.argv.last().expect("prompt");
+        assert!(
+            prompt.contains("in worktree {worktree} on branch {branch}, based on {base}."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("review --on you"), "{prompt}");
+        assert!(!prompt.contains("Project rule"), "{prompt}");
+        assert!(prompt.ends_with("\n\nProfile rule."), "{prompt}");
+
+        state.assign(desk, None).expect("unassign");
+        assert_eq!(
+            preview_prompt(&state, desk, &profiles, None, &mut host).map(|_| ()),
+            Err(DispatchError::NoAssignee)
+        );
+    }
+
+    #[test]
+    fn a_prompt_preview_of_a_dispatched_task_reads_its_record() {
+        let profiles = layered_profiles();
+        let (mut state, id) = task();
+        let mut host = FakeHost {
+            git: true,
+            ..FakeHost::default()
+        };
+        run_with_host(&mut state, id, &profiles, false, true, &mut host).expect("dispatch");
+        // A record the next dispatch would never pick: a renamed worktree and branch, and a
+        // remote base that shortens with its recorded remote.
+        let mut record = state
+            .get(id)
+            .and_then(|task| task.dispatch.clone())
+            .expect("record");
+        record.worktree = "/work/kept-T1".into();
+        record.branch = "tsk/t1-kept".into();
+        record.base = Some("upstream/release".into());
+        record.base_remote = Some("upstream".into());
+        state.record_dispatch(id, record).expect("record");
+        let before = serde_json::to_string(&state).expect("state");
+
+        let mut fresh = FakeHost {
+            git: true,
+            ..FakeHost::default()
+        };
+        let preview =
+            preview_prompt(&state, id, &profiles, Some("main"), &mut fresh).expect("preview");
+        assert_eq!(serde_json::to_string(&state).expect("state"), before);
+        assert!(!preview.predicted && !preview.desk);
+        let prompt = preview.argv.last().expect("prompt");
+        assert!(
+            prompt.contains("in worktree /work/kept-T1 on branch tsk/t1-kept, based on release."),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn unix_dispatch_types_a_fixed_line_and_keeps_task_text_and_env_values_off_it() {
         let path = std::env::temp_dir().join(format!(

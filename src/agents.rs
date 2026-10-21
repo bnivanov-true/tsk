@@ -25,6 +25,19 @@ static CONFIG_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// the quoted default prompt must stay equal to [`DEFAULT_PROMPT`] (pinned by a test).
 pub const STARTER_CONFIG: &str = r##"# tsk configuration
 #
+# tsk writes this file once and never updates it. Every setting, including
+# ones added in later versions, is listed at
+# https://gettsk.sh/docs/storage/#configuration
+#
+# Every setting below is commented out: remove the leading # to use one.
+# An unknown key or a bad value makes that table an error: tsk does not use
+# it and says why, on the board's status row or where the setting is used.
+# tsk ignores top-level keys and tables it does not know.
+
+# =============================================================================
+# Agent profiles
+# =============================================================================
+
 # Agent profiles let you assign a task to an agent (`@` or `!a name`).
 # In Herdr, starting an assigned project task (ctrl+s) dispatches it: tsk
 # creates a git worktree for the task, opens a Herdr workspace there, and runs
@@ -34,18 +47,23 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 # Any agent that runs in a terminal works, including ones not listed here.
 # A profile needs only:
 #
-#   [agent.<name>]                     name: lowercase letters, digits, - and .
+#   [agent.<name>]                     the profile's name
 #   command = ["program", "arg", ...]  the program and its arguments
+#
+# A name is lowercase letters, digits, - and ., up to 32 characters, and
+# starts with a letter or digit. Quote a name with dots: [agent."a.b"].
 #
 # tsk adds the prompt as the LAST argument, so the agent must accept its first
 # message as a trailing argument (`claude "…"`, `pi "…"`, `codex "…"`).
 #
 # Optional:
-#   prompt = "…"                       replaces the default prompt below
-#   [agent.<name>.env]                 extra environment variables
+#   prompt = "…"         replaces the default prompt below
+#   prompt_append = "…"  adds to the end of the default prompt; setting it
+#                        together with `prompt` is a config error
+#   [agent.<name>.env]   extra environment variables, as strings
 #   KEY = "value"
 #
-# Placeholders, usable in `command` and `prompt`:
+# Placeholders, usable in `command`, `prompt`, and `prompt_append`:
 #   {number}    task number, e.g. 12
 #   {title}     task title
 #   {notes}     task notes
@@ -53,7 +71,10 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 #   {worktree}  path of the task's worktree
 #   {branch}    the task's branch
 #   {base}      the branch the work starts from, e.g. main
-#
+#   {on}        who the agent hands reviews and blocks to: the project's
+#               `review_on`, or `you`
+
+# =============================================================================
 # The default prompt, used when a profile has no `prompt`:
 #
 #   You were dispatched to T{number} ({title}) in worktree {worktree} on
@@ -66,33 +87,46 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 #      done.
 #   4. Push and open a pull request into {base}. Never merge it.
 #   5. Set the task to review with what you did and what to check:
-#      `tsk status {number} review --done "…" --check "…"`, one `--check` per
-#      thing to verify, adding `--next` for what comes after. When you need a
-#      human, block it with your question: `tsk status {number} blocked
-#      --why "…"`, adding `--needs` and one `--option` per choice, then stop.
+#      `tsk status {number} review --on {on} --done "…" --check "…"`, one
+#      `--check` per thing to verify, adding `--next` for what comes after.
+#      When you need a decision, block it with your question: `tsk status
+#      {number} blocked --on {on} --why "…"`, adding `--needs` and one
+#      `--option` per choice, then stop. If your notes name someone else to
+#      hand it to, use that name instead of {on}.
 #   6. On a relaunch, first read whichever record closed last (`closed_at`)
 #      in `tsk list {number} --json`: the `replies` of the last `past_blocks`
 #      entry, or the `feedback` and failed `checks` of the last `past_reviews`
 #      entry when it was `sent_back`.
 #   7. A message `[tsk T{number} sent back] …` is review feedback, with any
 #      failed checks: address it, then set review again.
-#
-# Remove the leading # from a block below to use it.
+#   8. Never set the task to done; the person who reviews it does.
+# =============================================================================
 
-# --- Examples using the default prompt -------------------------------------
+# `tsk dispatch T12 --show-prompt` shows exactly what an agent gets.
 
-# Flags follow the program, for example a model: ["codex", "--model", "<model>"].
+# =============================================================================
+# Examples using the default prompt
+# =============================================================================
 
-# [agent.claude]
-# command = ["claude"]
+# Flags follow the program, e.g. a model: ["codex", "--model", "<model>"].
+
+# [agent.opus]
+# command = ["claude", "--model", "claude-opus-5-5"]
 
 # [agent.codex]
 # command = ["codex"]
 
-# [agent.pi]
-# command = ["pi"]
+# `env` sets variables for that agent only, here to mark its commits as the
+# agent's. Do not put API keys here: this file is plain text.
+# [agent.builder]
+# command = ["pi", "--model", "xai/grok-4.7", "--thinking", "high"]
+# [agent.builder.env]
+# GIT_AUTHOR_NAME = "builder (via tsk)"
+# GIT_COMMITTER_NAME = "builder (via tsk)"
 
-# --- Examples with their own prompt -----------------------------------------
+# =============================================================================
+# Examples with their own prompt
+# =============================================================================
 
 # A quick fixer for small tasks, with the task text inlined.
 # [agent.grok]
@@ -105,19 +139,21 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 # {steps}
 #
 # Keep the change small, commit on {branch}, open a pull request into {base},
-# then set the task to review.
+# then set the task to review with `tsk status {number} review --on {on}`.
 # """
 
-# Any other terminal agent: its program and flags go in `command`. `env` sets
-# variables for that agent only, here to mark its commits as the agent's.
-# Do not put API keys here: this file is plain text.
-# [agent.my-agent]
-# command = ["my-agent", "--some-flag"]
-# [agent.my-agent.env]
-# GIT_AUTHOR_NAME = "my-agent (via tsk)"
-# GIT_COMMITTER_NAME = "my-agent (via tsk)"
+# =============================================================================
+# Adding to the default prompt
+# =============================================================================
 
-# --- On Windows (preview) ---------------------------------------------------
+# `prompt_append` keeps the default prompt and adds your own lines after it.
+# [agent.claude-reviewed]
+# command = ["claude"]
+# prompt_append = "Before review, run the review checklist in CONTRIBUTING.md."
+
+# =============================================================================
+# On Windows (preview)
+# =============================================================================
 
 # tsk starts the agent through Windows PowerShell, so `command` may name an
 # .exe or the .ps1 shim npm installs (pi, codex). Write Windows paths as
@@ -125,46 +161,75 @@ pub const STARTER_CONFIG: &str = r##"# tsk configuration
 # [agent.claude-win]
 # command = ['C:\Users\you\.local\bin\claude.exe']
 
-# --- Merging a task's pull request ------------------------------------------
+# =============================================================================
+# Project settings
+# =============================================================================
+
+# Settings for one project, keyed by its repository path (`~` is your home
+# folder). They live only in this file, never in the repository. Desk tasks
+# never use them.
+#   review_on      who agents hand reviews and blocks to, the {on} value:
+#                  `you` (the default), an agent profile's name, or any
+#                  other name. A task handed to anyone but you stays out of
+#                  NEEDS YOU until someone hands it on, e.g.
+#                  `tsk edit T12 --on you`.
+#   prompt_append  added after the prompt, before the profile's own
+#                  `prompt_append`
+# [project."~/code/my-app"]
+# review_on = "coordinator"
+# prompt_append = "Run `make check` before review."
+
+# =============================================================================
+# Global config
+# =============================================================================
 
 # `m` on the cleanup card (or `tsk status T12 done --merge`) merges the task's
 # open pull request with the GitHub CLI (`gh`), then marks the task done and
-# cleans up. `method` is "merge" (the default), "squash", or "rebase".
+# cleans up.
+#   method  "merge" (the default), "squash", or "rebase"
 # [merge]
-# method = "squash"
-
-# --- How the board opens ----------------------------------------------------
+# method = "merge"
 
 # The group and sort a fresh board starts from (`g` and `s` change them for
 # the session only). `group` and `sort` set the desk; `project_group` and
-# `project_sort` set every project board. `messages` hides the agent message
-# lines under board rows (`z` toggles them for the session). `me` is the name
-# the board shows for you, such as `@sam` on a task assigned to you, instead
-# of `you`.
-#   group          "none", "project", "thread", or "assignee"
-#   sort           "recent", "project", "thread", "title", or "assignee"
-#   project_group  "none", "thread", or "assignee"
-#   project_sort   "recent", "thread", "title", or "assignee"
-#   messages       "shown" or "hidden"
-#   me             lowercase letters, digits, - and .; not an agent's name
+# `project_sort` set every project board. `messages` shows or hides the agent
+# message lines under board rows (`z` toggles them for the session). `me` is
+# the name the board shows for you, such as `@sam` on a task assigned to you.
+#   group          "none" (the default), "project", "thread", or "assignee"
+#   sort           "recent" (the default), "project", "thread", "title", or
+#                  "assignee"
+#   project_group  "none" (the default), "thread", or "assignee"
+#   project_sort   "recent" (the default), "thread", "title", or "assignee"
+#   messages       "shown" (the default) or "hidden"
+#   me             `you` by default; a name of lowercase letters, digits, -
+#                  and ., up to 32 characters, starting with a letter or
+#                  digit, and not an agent profile's name
+# The values below are the defaults, except `me`: uncommenting the block
+# changes only the name the board shows for you.
 # [board]
-# group = "project"
+# group = "none"
 # sort = "recent"
-# project_group = "thread"
-# project_sort = "title"
-# messages = "hidden"
+# project_group = "none"
+# project_sort = "recent"
+# messages = "shown"
 # me = "sam"
 
-# --- Backups ------------------------------------------------------------------
+# =============================================================================
+# Backups
+# =============================================================================
 
-# Saves copy tsk.json and this file (without `env` values) to a git
+# Backups copy tsk.json and this file (without `env` values) to a git
 # repository, using your own `git` and its credentials. `tsk backup setup`
 # makes a private GitHub repository with `gh`; `tsk backup add <git-url>` adds
 # any other. Both write an entry like the one below. `tsk backup list` shows
 # how each went, and `tsk restore` puts a version back. Backups hold your task
 # notes: keep the repository private.
-#   every  "save" (the default) or "daily"
+#   kind   optional; "git" is the only kind
+#   url    the repository to push to (required)
+#   every  "save" (the default): after every save; "daily": on the first
+#          save or full board open 24 hours after the last backup
 # [[backup]]
+# kind = "git"
 # url = "git@github.com:you/tsk-backup.git"
 # every = "save"
 "##;
@@ -267,14 +332,17 @@ pub const DEFAULT_PROMPT: &str = "You were dispatched to T{number} ({title}) in 
 2. Read the repo's agent instructions (AGENTS.md or CLAUDE.md) if present.
 3. Work only on {branch}. Run the project's checks before saying you are done.
 4. Push and open a pull request into {base}. Never merge it.
-5. Set the task to review with what you did and what to check: `tsk status {number} review --done \"…\" --check \"…\"`, one `--check` per thing to verify, adding `--next` for what comes after. When you need a human, block it with your question: `tsk status {number} blocked --why \"…\"`, adding `--needs` and one `--option` per choice, then stop.
+5. Set the task to review with what you did and what to check: `tsk status {number} review --on {on} --done \"…\" --check \"…\"`, one `--check` per thing to verify, adding `--next` for what comes after. When you need a decision, block it with your question: `tsk status {number} blocked --on {on} --why \"…\"`, adding `--needs` and one `--option` per choice, then stop. If your notes name someone else to hand it to, use that name instead of {on}.
 6. On a relaunch, first read whichever record closed last (`closed_at`) in `tsk list {number} --json`: the `replies` of the last `past_blocks` entry, or the `feedback` and failed `checks` of the last `past_reviews` entry when it was `sent_back`.
-7. A message `[tsk T{number} sent back] …` is review feedback, with any failed checks: address it, then set review again.";
+7. A message `[tsk T{number} sent back] …` is review feedback, with any failed checks: address it, then set review again.
+8. Never set the task to done; the person who reviews it does.";
 
 /// All agent profiles loaded from one state directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentProfiles {
     profiles: BTreeMap<String, AgentProfile>,
+    /// `[project."<path>"]` settings in file order; the first key naming a project wins.
+    projects: Vec<(String, ProjectSettings)>,
 }
 
 impl AgentProfiles {
@@ -296,10 +364,17 @@ impl AgentProfiles {
                 .map_err(|source| AgentLoadError::MalformedToml {
                     source: Box::new(source),
                 })?;
+        let projects = match document.get("project") {
+            None => Vec::new(),
+            Some(item) => parse_projects(item)?,
+        };
         // Other top-level keys are settings for other features, possibly from a newer
         // binary: ignore them so an older tsk still reads its profiles.
         let Some(agents) = document.get("agent") else {
-            return Ok(Self::default());
+            return Ok(Self {
+                profiles: BTreeMap::new(),
+                projects,
+            });
         };
         let agents = agents
             .as_table_like()
@@ -315,7 +390,7 @@ impl AgentProfiles {
                 .ok_or_else(|| invalid_profile(name, "profile must be a [agent.<name>] table"))?;
             profiles.insert(name.to_string(), parse_profile(name, table)?);
         }
-        Ok(Self { profiles })
+        Ok(Self { profiles, projects })
     }
 
     /// Whether `content` parses as profiles (tests of other modules).
@@ -345,6 +420,16 @@ impl AgentProfiles {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.profiles.keys().map(String::as_str)
+    }
+
+    /// The `[project."<path>"]` settings for a task's repository. Keys expand `~` and compare
+    /// like project paths do (canonically when both exist); the first match in the file wins.
+    pub fn project(&self, path: &Path) -> Option<&ProjectSettings> {
+        let path = path.to_string_lossy();
+        self.projects
+            .iter()
+            .find(|(key, _)| crate::scope::paths_equivalent(&crate::scope::expand_home(key), &path))
+            .map(|(_, settings)| settings)
     }
 
     /// Read a typed assignee by the name rule against these profiles: you, a profile (an
@@ -433,17 +518,51 @@ impl OwnerName {
 pub struct AgentProfile {
     pub command: Vec<String>,
     pub prompt: Option<String>,
+    /// Text added after the default prompt; never set together with `prompt`.
+    pub prompt_append: Option<String>,
     pub env: BTreeMap<String, String>,
 }
 
+/// `[project."<path>"]` in `config.toml`: per-repository dispatch settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectSettings {
+    /// Who the launched agent hands review to, the `{on}` placeholder. `None` is you.
+    pub review_on: Option<String>,
+    /// Text added after the prompt, before the profile's own `prompt_append`.
+    pub prompt_append: Option<String>,
+}
+
+impl ProjectSettings {
+    /// The `{on}` value: the configured name, or `you`.
+    pub fn on(&self) -> &str {
+        self.review_on.as_deref().unwrap_or(crate::domain::OWNER)
+    }
+}
+
 impl AgentProfile {
-    /// Substitute this profile for one task.
-    pub fn render(&self, context: &RenderContext<'_>) -> RenderedLaunch {
-        let prompt = render_template(self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT), context);
+    /// Substitute this profile for one task, adding the task's project settings, if any.
+    pub fn render(
+        &self,
+        context: &RenderContext<'_>,
+        project: Option<&ProjectSettings>,
+    ) -> RenderedLaunch {
+        let on = project.map_or(crate::domain::OWNER, ProjectSettings::on);
+        let template = [
+            Some(self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT)),
+            project.and_then(|project| project.prompt_append.as_deref()),
+            self.prompt_append.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim_end)
+        .filter(|layer| !layer.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+        let prompt = render_template(&template, context, on);
         let mut argv = self
             .command
             .iter()
-            .map(|argument| render_template(argument, context))
+            .map(|argument| render_template(argument, context, on))
             .collect::<Vec<_>>();
         argv.push(prompt);
         RenderedLaunch {
@@ -920,7 +1039,7 @@ fn parse_profile(name: &str, table: &dyn TableLike) -> Result<AgentProfile, Agen
     if let Some(key) = table
         .iter()
         .map(|(key, _)| key)
-        .find(|key| !matches!(*key, "command" | "prompt" | "env"))
+        .find(|key| !matches!(*key, "command" | "prompt" | "prompt_append" | "env"))
     {
         return Err(invalid_profile(name, format!("unknown key {key:?}")));
     }
@@ -948,6 +1067,21 @@ fn parse_profile(name: &str, table: &dyn TableLike) -> Result<AgentProfile, Agen
         })
         .transpose()?;
 
+    let prompt_append = table
+        .get("prompt_append")
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| invalid_profile(name, "prompt_append must be a string"))
+        })
+        .transpose()?;
+    if prompt.is_some() && prompt_append.is_some() {
+        return Err(invalid_profile(
+            name,
+            "set prompt or prompt_append, not both: prompt replaces the default, prompt_append adds to it",
+        ));
+    }
+
     let env = match table.get("env") {
         None => BTreeMap::new(),
         Some(item) => item
@@ -966,11 +1100,77 @@ fn parse_profile(name: &str, table: &dyn TableLike) -> Result<AgentProfile, Agen
     Ok(AgentProfile {
         command,
         prompt,
+        prompt_append,
         env,
     })
 }
 
-fn render_template(template: &str, context: &RenderContext<'_>) -> String {
+fn parse_projects(
+    item: &toml_edit::Item,
+) -> Result<Vec<(String, ProjectSettings)>, AgentLoadError> {
+    let invalid = |message: String| AgentLoadError::InvalidDocument { message };
+    let projects = item
+        .as_table_like()
+        .ok_or_else(|| invalid("expected [project.\"<path>\"] tables".into()))?;
+    projects
+        .iter()
+        .map(|(path, item)| {
+            let refuse = |message: &str| invalid(format!("project {path:?}: {message}"));
+            let table = item
+                .as_table_like()
+                .ok_or_else(|| refuse("must be a [project.\"<path>\"] table"))?;
+            if let Some(key) = table
+                .iter()
+                .map(|(key, _)| key)
+                .find(|key| !matches!(*key, "review_on" | "prompt_append"))
+            {
+                return Err(refuse(&format!("unknown key {key:?}")));
+            }
+            let string = |key: &str| {
+                table
+                    .get(key)
+                    .map(|item| {
+                        item.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| refuse(&format!("{key} must be a string")))
+                    })
+                    .transpose()
+            };
+            let review_on = string("review_on")?
+                .map(|value| parse_review_on(&value).map_err(|message| refuse(&message)))
+                .transpose()?
+                .flatten();
+            Ok((
+                path.to_string(),
+                ProjectSettings {
+                    review_on,
+                    prompt_append: string("prompt_append")?,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// `review_on` by the `--on` name rule: empty, `you`, or `me` is you (`None`); anything else
+/// must be a valid name, kept normalized.
+fn parse_review_on(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    let name = value.strip_prefix('@').unwrap_or(value);
+    if name.is_empty()
+        || name.eq_ignore_ascii_case(crate::domain::OWNER)
+        || name.eq_ignore_ascii_case("me")
+    {
+        return Ok(None);
+    }
+    normalize_thread(name).map(Some).map_err(|error| {
+        format!(
+            "review_on {value:?}: {}",
+            thread_refusal_message(error).replacen("thread", "name", 1)
+        )
+    })
+}
+
+fn render_template(template: &str, context: &RenderContext<'_>, on: &str) -> String {
     let number = context.number.to_string();
     let replacements = [
         ("{number}", number.as_str()),
@@ -980,6 +1180,7 @@ fn render_template(template: &str, context: &RenderContext<'_>) -> String {
         ("{worktree}", context.worktree),
         ("{branch}", context.branch),
         ("{base}", context.base),
+        ("{on}", on),
     ];
     let mut rendered = String::with_capacity(template.len());
     let mut remaining = template;
@@ -1093,7 +1294,7 @@ mod tests {
     #[test]
     fn base_placeholder_uses_the_target_branch() {
         let profiles = AgentProfiles::parse("[agent.builder]\ncommand = [\"echo\", \"{base}\"]\nprompt = \"Open the PR into {base}\"\n").unwrap();
-        let rendered = profiles.get("builder").unwrap().render(&context());
+        let rendered = profiles.get("builder").unwrap().render(&context(), None);
         assert_eq!(
             rendered.argv,
             vec!["echo", "dispatch", "Open the PR into dispatch"]
@@ -1341,6 +1542,18 @@ command = ["pi"]
     }
 
     #[test]
+    fn starter_merge_example_holds_the_default_once_uncommented() {
+        let uncommented = STARTER_CONFIG
+            .replace("# [merge]\n", "[merge]\n")
+            .replace("# method = ", "method = ");
+        assert!(uncommented.contains("[merge]\nmethod = "));
+        assert_eq!(
+            MergeMethod::parse(&uncommented).expect("example parses"),
+            MergeMethod::default()
+        );
+    }
+
+    #[test]
     fn starter_board_example_parses_once_uncommented() {
         assert_eq!(
             BoardDefaults::parse(STARTER_CONFIG).expect("starter parses"),
@@ -1361,13 +1574,8 @@ command = ["pi"]
             .join("\n");
         assert_eq!(
             BoardDefaults::parse(&uncommented).expect("uncommented example parses"),
-            BoardDefaults {
-                group: GroupBy::Project,
-                sort: SortBy::Recent,
-                project_group: GroupBy::Thread,
-                project_sort: SortBy::Title,
-                messages_hidden: true,
-            }
+            BoardDefaults::default(),
+            "the example holds the defaults"
         );
         assert_eq!(
             OwnerName::parse(&uncommented, &AgentProfiles::default()).name,
@@ -1450,10 +1658,11 @@ command = ["pi"]
                 "{unknown}".into(),
             ],
             prompt: Some("Task T{number}\n{notes}\n{steps}".into()),
+            prompt_append: None,
             env: Default::default(),
         };
 
-        let rendered = profile.render(&context());
+        let rendered = profile.render(&context(), None);
         assert_eq!(
             rendered.argv,
             [
@@ -1476,15 +1685,16 @@ command = ["pi"]
         let profile = AgentProfile {
             command: vec!["fable".into()],
             prompt: None,
+            prompt_append: None,
             env: Default::default(),
         };
 
-        let rendered = profile.render(&context());
+        let rendered = profile.render(&context(), None);
         assert_eq!(
             rendered.argv,
             [
                 "fable",
-                render_template(DEFAULT_PROMPT, &context()).as_str()
+                render_template(DEFAULT_PROMPT, &context(), "you").as_str()
             ]
         );
     }
@@ -1494,10 +1704,11 @@ command = ["pi"]
         let profile = AgentProfile {
             command: vec!["pi".into(), "--model".into(), "opus".into()],
             prompt: Some("Review T{number}: {title}".into()),
+            prompt_append: None,
             env: Default::default(),
         };
 
-        let rendered = profile.render(&context());
+        let rendered = profile.render(&context(), None);
         assert_eq!(
             rendered.argv,
             ["pi", "--model", "opus", "Review T101: Load profiles"]
@@ -1510,10 +1721,11 @@ command = ["pi"]
         let profile = AgentProfile {
             command: vec!["pi".into()],
             prompt: None,
+            prompt_append: None,
             env: Default::default(),
         };
 
-        let rendered = profile.render(&context());
+        let rendered = profile.render(&context(), None);
         assert_eq!(
             rendered.argv.last().expect("appended prompt"),
             "You were dispatched to T101 (Load profiles) in worktree /tmp/tsk-t101 on branch \
@@ -1523,16 +1735,159 @@ tsk/t101-load-profiles, based on dispatch.
 2. Read the repo's agent instructions (AGENTS.md or CLAUDE.md) if present.
 3. Work only on tsk/t101-load-profiles. Run the project's checks before saying you are done.
 4. Push and open a pull request into dispatch. Never merge it.
-5. Set the task to review with what you did and what to check: `tsk status 101 review --done \
-\"…\" --check \"…\"`, one `--check` per thing to verify, adding `--next` for what comes after. \
-When you need a human, block it with your question: `tsk status 101 blocked --why \"…\"`, adding \
-`--needs` and one `--option` per choice, then stop.
+5. Set the task to review with what you did and what to check: `tsk status 101 review --on you \
+--done \"…\" --check \"…\"`, one `--check` per thing to verify, adding `--next` for what comes \
+after. When you need a decision, block it with your question: `tsk status 101 blocked --on you \
+--why \"…\"`, adding `--needs` and one `--option` per choice, then stop. If your notes name someone \
+else to hand it to, use that name instead of you.
 6. On a relaunch, first read whichever record closed last (`closed_at`) in `tsk list 101 --json`: \
 the `replies` of the last `past_blocks` entry, or the `feedback` and failed `checks` of the last \
 `past_reviews` entry when it was `sent_back`.
 7. A message `[tsk T101 sent back] …` is review feedback, with any failed checks: address it, \
-then set review again."
+then set review again.
+8. Never set the task to done; the person who reviews it does."
         );
+    }
+
+    #[test]
+    fn prompt_layers_follow_the_prompt_and_render_their_placeholders() {
+        let profiles = AgentProfiles::parse(
+            "[project.\"/repos/app\"]\nreview_on = \"@Coordinator\"\nprompt_append = \"Project: T{number} to {on}.\\n\"\n\
+             [agent.plain]\ncommand = [\"pi\", \"{on}\"]\n\
+             [agent.extra]\ncommand = [\"pi\"]\nprompt_append = \"Profile: {branch}.\"\n\
+             [agent.own]\ncommand = [\"pi\"]\nprompt = \"Mine, for {on}.\"\n",
+        )
+        .expect("layers parse");
+        let project = profiles.project(Path::new("/repos/app")).expect("project");
+        assert_eq!(project.on(), "coordinator");
+        let prompt = |name: &str, project| {
+            profiles
+                .get(name)
+                .expect("profile")
+                .render(&context(), project)
+                .argv
+                .pop()
+                .expect("prompt")
+        };
+        let default = render_template(DEFAULT_PROMPT, &context(), "coordinator");
+        assert!(default.contains("`tsk status 101 review --on coordinator --done"));
+
+        assert_eq!(
+            prompt("extra", Some(project)),
+            format!(
+                "{default}\n\nProject: T101 to coordinator.\n\nProfile: tsk/t101-load-profiles."
+            )
+        );
+        assert_eq!(
+            prompt("plain", Some(project)),
+            format!("{default}\n\nProject: T101 to coordinator.")
+        );
+        assert_eq!(
+            prompt("own", Some(project)),
+            "Mine, for coordinator.\n\nProject: T101 to coordinator."
+        );
+        // Without project settings `{on}` is you, in the command too.
+        let desk = profiles
+            .get("plain")
+            .expect("plain")
+            .render(&context(), None);
+        assert_eq!(desk.argv[1], "you");
+        assert_eq!(
+            desk.argv[2],
+            render_template(DEFAULT_PROMPT, &context(), "you")
+        );
+        assert!(desk.argv[2].contains("review --on you --done"));
+        assert_eq!(
+            prompt("extra", None),
+            format!(
+                "{}\n\nProfile: tsk/t101-load-profiles.",
+                render_template(DEFAULT_PROMPT, &context(), "you")
+            )
+        );
+    }
+
+    #[test]
+    fn prompt_with_prompt_append_and_bad_project_settings_are_config_errors() {
+        let error = |content: &str| {
+            AgentProfiles::parse(content)
+                .expect_err(content)
+                .to_string()
+        };
+        assert!(
+            error("[agent.both]\ncommand = [\"pi\"]\nprompt = \"a\"\nprompt_append = \"b\"\n")
+                .contains("agent \"both\": set prompt or prompt_append, not both")
+        );
+        assert!(error("[agent.pi]\ncommand = [\"pi\"]\nprompt_append = 3\n")
+            .contains("prompt_append must be a string"));
+        assert_eq!(
+            error("[project.\"/repos/app\"]\nreview = \"x\"\n"),
+            "config.toml: project \"/repos/app\": unknown key \"review\""
+        );
+        assert!(
+            error("[project.\"/repos/app\"]\nreview_on = \"two words\"\n")
+                .starts_with("config.toml: project \"/repos/app\": review_on \"two words\": ")
+        );
+        assert!(error("[project.\"/repos/app\"]\nprompt_append = [\"x\"]\n")
+            .contains("prompt_append must be a string"));
+        assert!(error("project = 1\n").contains("[project."));
+        // A bad project section refuses even with no profiles at all.
+        assert!(AgentProfiles::parse("[project.\"/a\"]\nother = 1\n").is_err());
+
+        for you in ["", "you", "ME", "@you"] {
+            let content = format!("[project.\"/a\"]\nreview_on = \"{you}\"\n");
+            let profiles = AgentProfiles::parse(&content).expect("you");
+            let project = profiles.project(Path::new("/a")).expect("project");
+            assert_eq!((project.review_on.as_deref(), project.on()), (None, "you"));
+        }
+    }
+
+    #[test]
+    fn project_keys_expand_home_and_match_symlinked_or_slashed_spellings() {
+        let dir = TempDir::new("project-match");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        let settings = |key: &str| {
+            let content = format!(
+                "[project.'{key}']\nreview_on = \"lead\"\n[project.'/elsewhere']\nreview_on = \"other\"\n"
+            );
+            AgentProfiles::parse(&content).expect("parse")
+        };
+        let found = |profiles: &AgentProfiles, path: &Path| {
+            profiles
+                .project(path)
+                .map(|project| project.on().to_string())
+        };
+
+        let slashed = settings(&format!("{}/", repo.display()));
+        assert_eq!(found(&slashed, &repo).as_deref(), Some("lead"));
+        assert_eq!(found(&slashed, &dir.path().join("other")), None);
+
+        let home = crate::scope::expand_home("~");
+        if home != "~" {
+            let key = "~/tsk-project-key-test";
+            assert_eq!(
+                found(
+                    &settings(key),
+                    &Path::new(&home).join("tsk-project-key-test")
+                )
+                .as_deref(),
+                Some("lead")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&repo, &link).expect("symlink");
+            assert_eq!(
+                found(&settings(&link.to_string_lossy()), &repo).as_deref(),
+                Some("lead")
+            );
+            assert_eq!(
+                found(&settings(&repo.to_string_lossy()), &link).as_deref(),
+                Some("lead")
+            );
+        }
     }
 
     /// Run a Unix launcher the way a pane does: `pane -c '<typed line>'`, with `SHELL` set to
@@ -1566,9 +1921,10 @@ then set review again."
                 "{title}".into(),
             ],
             prompt: Some("Do T{number}: {title}".into()),
+            prompt_append: None,
             env: [("TSK_TEST_KEY".to_string(), "secret value".to_string())].into(),
         };
-        let rendered = profile.render(&RenderContext { title, ..context() });
+        let rendered = profile.render(&RenderContext { title, ..context() }, None);
         let launchers = dir.path().join("launchers");
         fs::create_dir_all(&launchers).expect("launchers");
         let launcher = launchers.join("dispatch-w1.sh");
@@ -1682,9 +2038,10 @@ then set review again."
         let profile = AgentProfile {
             command: vec!["agent".into()],
             prompt: Some("{title}".into()),
+            prompt_append: None,
             env: [("API_TOKEN".to_string(), "it's secret".to_string())].into(),
         };
-        let rendered = profile.render(&context());
+        let rendered = profile.render(&context(), None);
         let script = rendered.shell_script("/state/launchers/dispatch-w1.sh");
         let (login, rest) = script.split_once("\nrm -f").expect("login stage");
         assert!(
@@ -1783,16 +2140,20 @@ then set review again."
         let profile = AgentProfile {
             command: vec!["claude".into(), "--add-dir".into(), "{worktree}".into()],
             prompt: Some("Don't \"quote\" $HOME %PATH% `x`; T{number}\ncafé".into()),
+            prompt_append: None,
             env: [(
                 "GIT_AUTHOR_NAME".to_string(),
                 "a \"b\" (via tsk)".to_string(),
             )]
             .into(),
         };
-        let rendered = profile.render(&RenderContext {
-            worktree: r"C:\Users\Some One\.herdr\worktrees\app\tsk-t101",
-            ..context()
-        });
+        let rendered = profile.render(
+            &RenderContext {
+                worktree: r"C:\Users\Some One\.herdr\worktrees\app\tsk-t101",
+                ..context()
+            },
+            None,
+        );
         let script = rendered.powershell_script();
 
         assert!(script.is_ascii(), "{script}");
@@ -1832,7 +2193,7 @@ then set review again."
             .lines()
             .skip_while(|line| !line.starts_with("# The default prompt, used when"))
             .skip(2)
-            .take_while(|line| !line.starts_with("# Remove the leading #"))
+            .take_while(|line| !line.starts_with("# ==="))
             .collect::<Vec<_>>();
         let mut prompt = String::new();
         for line in lines {
@@ -1858,6 +2219,32 @@ then set review again."
     }
 
     #[test]
+    fn starter_file_defines_every_setting_the_parsers_accept() {
+        for key in [
+            "command = ",
+            "prompt = ",
+            "prompt_append = ",
+            "[agent.<name>.env]",
+            "review_on ",
+            "method ",
+            "group ",
+            "sort ",
+            "project_group ",
+            "project_sort ",
+            "messages ",
+            "me ",
+            "kind ",
+            "url ",
+            "every ",
+        ] {
+            assert!(
+                STARTER_CONFIG.contains(&format!("#   {key}")),
+                "the starter defines {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn starter_file_quotes_the_default_prompt_verbatim() {
         assert_eq!(starter_quoted_default_prompt(), DEFAULT_PROMPT);
     }
@@ -1874,7 +2261,9 @@ then set review again."
         let examples = STARTER_CONFIG
             .lines()
             .map(|line| {
-                in_block = line.starts_with("# [agent.") || (in_block && !line.is_empty());
+                in_block = line.starts_with("# [agent.")
+                    || line.starts_with("# [project.")
+                    || (in_block && !line.is_empty());
                 if in_block {
                     line.strip_prefix("# ")
                         .unwrap_or(line.trim_start_matches('#'))
@@ -1887,8 +2276,24 @@ then set review again."
         let profiles = AgentProfiles::parse(&examples).expect("uncommented examples parse");
         assert_eq!(
             profiles.names().collect::<Vec<_>>(),
-            ["claude", "claude-win", "codex", "grok", "my-agent", "pi"]
+            [
+                "builder",
+                "claude-reviewed",
+                "claude-win",
+                "codex",
+                "grok",
+                "opus"
+            ]
         );
+        assert!(profiles
+            .get("claude-reviewed")
+            .expect("append example")
+            .prompt_append
+            .is_some());
+        let home = crate::scope::expand_home("~/code/my-app");
+        let project = profiles.project(Path::new(&home)).expect("project example");
+        assert_eq!(project.on(), "coordinator");
+        assert!(project.prompt_append.is_some());
         assert_eq!(
             profiles.get("claude-win").expect("windows example").command,
             [r"C:\Users\you\.local\bin\claude.exe"]
@@ -1900,8 +2305,8 @@ then set review again."
             .expect("grok prompt")
             .starts_with("Fix T{number}: {title}\n\n{notes}"));
         assert_eq!(
-            profiles.get("my-agent").expect("generic example").env["GIT_AUTHOR_NAME"],
-            "my-agent (via tsk)"
+            profiles.get("builder").expect("env example").env["GIT_AUTHOR_NAME"],
+            "builder (via tsk)"
         );
         assert!(profiles.get("codex").expect("codex").prompt.is_none());
     }
@@ -1924,7 +2329,7 @@ LITERAL = "{branch}"
         let rendered = profiles
             .get("implementer")
             .expect("implementer")
-            .render(&context());
+            .render(&context(), None);
         assert_eq!(rendered.env["PI_MODEL"], "anthropic/claude");
         assert_eq!(rendered.env["LITERAL"], "{branch}");
         let script = rendered.shell_script("/state/launchers/dispatch-w1.sh");
