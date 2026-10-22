@@ -16,6 +16,10 @@ first added in the same Unreleased section is not an entry: edit that entry inst
 
 - `tsk setup` names both installed skills, `tsk-cli` and `tsk-coordinator`, beside each agent's skills directory instead of printing only the `tsk-cli` file.
 
+### Fixed
+
+- A bare token in an https backup URL is removed and masked even when the URL does not start at the scheme.
+
 ## v0.13.0
 
 ### Breaking
